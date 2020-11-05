@@ -16,6 +16,7 @@ import pyro.poutine.runtime
 import pyro.poutine.util
 from pyro.poutine.escape_messenger import EscapeMessenger
 from pyro.poutine.subsample_messenger import _Subsample
+from pyro.distributions import MarkovCategorical
 
 from pyro.contrib.funsor.handlers.primitives import to_data, to_funsor
 from pyro.contrib.funsor.handlers.named_messenger import NamedMessenger
@@ -158,6 +159,33 @@ class EnumMessenger(NamedMessenger):
             msg["funsor"]["log_measure"], msg["name"], expand=msg["infer"].get("expand", False))
         msg["value"] = to_data(msg["funsor"]["value"])
         msg["done"] = True
+
+
+class MarkovEnumMessenger(EnumMessenger):
+    def _pyro_sample(self, msg):
+        if isinstance(msg["fn"], MarkovCategorical):
+            # we'll assume that the leftmost batch dimension of `msg["fn"]` is the time dimension,
+            # meaning we assume parameters are 
+            # and that it does not correspond to a plate in the model.
+            leftmost_dim = -len(msg["fn"].batch_shape) - 1
+            # provide names for the two fresh dimensions introduced when enumerating
+            # dim_to_name = {leftmost_dim: msg["name"] + "__TIME", leftmost_dim - 1: msg["name"]}
+            dim_to_name = {leftmost_dim - 1: msg["name"], leftmost_dim: msg["name"] + "__TIME"}
+            # enumerate and immediately convert to funsor
+            if "funsor" not in msg:
+                msg["funsor"] = {}
+            #import pdb; pdb.set_trace()
+            msg["funsor"]["value"] = to_funsor(
+                msg["fn"].enumerate_support(expand=False),
+                output=funsor.Bint[msg["fn"]._num_events],
+                dim_to_name=dim_to_name
+            )
+            # convert back to data, ensuring that msg["value"] now has the correct shape
+            msg["value"] = to_data(msg["funsor"]["value"])
+            print(msg["value"].shape)
+            print(msg["funsor"]["value"])
+        else:
+            return super()._pyro_sample(msg)
 
 
 def queue(fn=None, queue=None,
