@@ -16,7 +16,6 @@ import pyro.poutine.runtime
 import pyro.poutine.util
 from pyro.poutine.escape_messenger import EscapeMessenger
 from pyro.poutine.subsample_messenger import _Subsample
-from pyro.distributions import MarkovCategorical
 
 from pyro.contrib.funsor.handlers.primitives import to_data, to_funsor
 from pyro.contrib.funsor.handlers.named_messenger import NamedMessenger
