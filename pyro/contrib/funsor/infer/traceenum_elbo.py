@@ -58,7 +58,7 @@ class TraceEnum_ELBO(ELBO):
         model_terms = terms_from_trace(model_tr)
 
         # build up a lazy expression for the elbo
-        with funsor.interpreter.interpretation(funsor.terms.lazy):
+        with funsor.interpreter.interpretation(funsor.terms.eager):
             # identify and contract out auxiliary variables in the model with partial_sum_product
             contracted_factors, uncontracted_factors = [], []
             for f in model_terms["log_factors"]:

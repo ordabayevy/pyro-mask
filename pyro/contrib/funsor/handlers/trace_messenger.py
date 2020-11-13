@@ -24,7 +24,8 @@ class TraceMessenger(OrigTraceMessenger):
         self.pack_online = True if pack_online is None else pack_online
 
     def _pyro_post_sample(self, msg):
-        if msg["name"] in self.trace:
+        if msg["name"] in self.trace or \
+                msg["name"].endswith("prev"):
             return
         if "funsor" not in msg:
             msg["funsor"] = {}
