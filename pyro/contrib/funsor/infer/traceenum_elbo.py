@@ -67,7 +67,7 @@ class TraceMarkovEnum_ELBO(ELBO):
         #      raise NotImplementedError("TraceMarkovEnum_ELBO does not yet support guide side Markov enumeration")
 
         # build up a lazy expression for the elbo
-        with funsor.interpreter.interpretation(funsor.terms.eager):
+        with funsor.interpreter.interpretation(funsor.terms.lazy):
             # identify and contract out auxiliary variables in the model with partial_sum_product
             contracted_factors, uncontracted_factors = [], []
             for f in model_terms["log_factors"]:
@@ -94,8 +94,6 @@ class TraceMarkovEnum_ELBO(ELBO):
             for cost in costs:
                 markov_dims = frozenset({
                         plate for plate, step in guide_terms["plate_to_step"].items() if step})
-                # breakpoint()
-                # integrand = cost(**{plate: f"{plate}_int" for plate in plate_vars})
                 elbo_term = funsor.sum_product.sequential_integral(
                     funsor.ops.add, funsor.ops.mul,
                     [term.exp() for term in guide_terms["log_measures"]],
@@ -103,15 +101,6 @@ class TraceMarkovEnum_ELBO(ELBO):
                     plate_to_step=guide_terms["plate_to_step"],
                     eliminate=(plate_vars | guide_terms["measure_vars"] | markov_dims)
                 )
-                # compute the marginal logq in the guide corresponding to this cost term
-                #  log_prob = funsor.sum_product.sum_product(
-                #      funsor.ops.logaddexp, funsor.ops.add,
-                #      guide_terms["log_measures"],
-                #      plates=plate_vars,
-                #      eliminate=(plate_vars | guide_terms["measure_vars"]) - frozenset(cost.inputs)
-                #  )
-                #  # compute the expected cost term E_q[logp] or E_q[-logq] using the marginal logq for q
-                #  elbo_term = funsor.Integrate(log_prob, cost, guide_terms["measure_vars"] & frozenset(cost.inputs))
                 elbo += elbo_term.reduce(funsor.ops.add, plate_vars & frozenset(cost.inputs))
 
         # evaluate the elbo, using memoize to share tensor computation where possible
