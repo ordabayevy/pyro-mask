@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import contextlib
+from functools import reduce
 
 import funsor
 from funsor.adjoint import AdjointTape
@@ -68,10 +69,6 @@ class TraceMarkovEnum_ELBO(ELBO):
         guide_terms = terms_from_trace(guide_tr)
         model_terms = terms_from_trace(model_tr)
 
-        # guide side enumeration is not supported
-        if any(guide_terms["plate_to_step"].values()):
-            raise NotImplementedError("TraceMarkovEnum_ELBO does not yet support guide side Markov enumeration")
-
         # build up a lazy expression for the elbo
         with funsor.terms.lazy:
             # identify and contract out auxiliary variables in the model with partial_sum_product
@@ -94,19 +91,36 @@ class TraceMarkovEnum_ELBO(ELBO):
             costs = contracted_costs + uncontracted_factors  # model costs: logp
             costs += [-f for f in guide_terms["log_factors"]]  # guide costs: -logq
 
-            # finally, integrate out guide variables in the elbo and all plates
             plate_vars = guide_terms["plate_vars"] | model_terms["plate_vars"]
+            # compute the marginal logq in the guide corresponding to each cost term
+            targets = dict()
+            for cost in costs:
+                input_vars = frozenset(cost.inputs)
+                if input_vars not in targets:
+                    targets[input_vars] = funsor.Tensor(
+                        funsor.ops.new_zeros(
+                            funsor.tensor.get_default_prototype(),
+                            tuple(v.size for v in cost.inputs.values()),
+                        ),
+                        cost.inputs,
+                        cost.dtype,
+                    )
+            with AdjointTape() as tape:
+                logzqs = funsor.sum_product.modified_partial_sum_product(
+                    funsor.ops.logaddexp, funsor.ops.add,
+                    guide_terms["log_measures"] + list(targets.values()),
+                    plate_to_step=guide_terms["plate_to_step"],
+                    eliminate=(plate_vars | guide_terms["measure_vars"])
+                )
+                logzq = reduce(funsor.ops.add, logzqs, funsor.terms.Number(0.0))
+            marginals = tape.adjoint(funsor.ops.logaddexp, funsor.ops.add, logzq, tuple(targets.values()))
+            # finally, integrate out guide variables in the elbo and all plates
             elbo = to_funsor(0, output=funsor.Real)
             for cost in costs:
-                # compute the marginal logq in the guide corresponding to this cost term
-                log_prob = funsor.sum_product.sum_product(
-                    funsor.ops.logaddexp, funsor.ops.add,
-                    guide_terms["log_measures"],
-                    plates=plate_vars,
-                    eliminate=(plate_vars | guide_terms["measure_vars"]) - frozenset(cost.inputs)
-                )
-                # compute the expected cost term E_q[logp] or E_q[-logq] using the marginal logq for q
-                elbo_term = funsor.Integrate(log_prob, cost, guide_terms["measure_vars"] & frozenset(cost.inputs))
+                target = targets[frozenset(cost.inputs)]
+                logzq_local = marginals[target].reduce(funsor.ops.logaddexp, frozenset(cost.inputs) - plate_vars)
+                log_prob = marginals[target] - logzq_local
+                elbo_term = funsor.Integrate(log_prob, cost, guide_terms["measure_vars"] & frozenset(log_prob.inputs))
                 elbo += elbo_term.reduce(funsor.ops.add, plate_vars & frozenset(cost.inputs))
 
         # evaluate the elbo, using memoize to share tensor computation where possible
@@ -166,7 +180,7 @@ class TraceEnum_ELBO(ELBO):
                 logzq = funsor.sum_product.sum_product(
                     funsor.ops.logaddexp, funsor.ops.add,
                     guide_terms["log_measures"] + list(targets.values()),
-                    plates=plate_vars,
+                    plates=guide_terms["plate_vars"],
                     eliminate=(plate_vars | guide_terms["measure_vars"])
                 )
             marginals = tape.adjoint(funsor.ops.logaddexp, funsor.ops.add, logzq, tuple(targets.values()))
