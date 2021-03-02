@@ -180,7 +180,7 @@ class TraceEnum_ELBO(ELBO):
                 logzq = funsor.sum_product.sum_product(
                     funsor.ops.logaddexp, funsor.ops.add,
                     guide_terms["log_measures"] + list(targets.values()),
-                    plates=guide_terms["plate_vars"],
+                    plates=plate_vars,
                     eliminate=(plate_vars | guide_terms["measure_vars"])
                 )
             marginals = tape.adjoint(funsor.ops.logaddexp, funsor.ops.add, logzq, tuple(targets.values()))
