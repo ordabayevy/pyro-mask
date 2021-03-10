@@ -60,7 +60,7 @@ EXTRAS_REQUIRE = [
     'jupyter>=1.0.0',
     'graphviz>=0.8',
     'matplotlib>=1.3',
-    'torchvision>=0.9.0.dev20210210',
+    'torchvision>=0.9.0',
     'visdom>=0.1.4',
     'pandas',
     'scikit-learn',
@@ -89,7 +89,7 @@ setup(
         'numpy>=1.7',
         'opt_einsum>=2.3.2',
         'pyro-api>=0.1.1',
-        'torch>=1.8.0.dev20210210',
+        'torch>=1.8.0',
         'tqdm>=4.36',
     ],
     extras_require={
@@ -120,8 +120,7 @@ setup(
         'horovod': ['horovod[pytorch]>=0.19'],
         'funsor': [
             # This must be a released version when Pyro is released.
-            'funsor[torch] @ git+git://github.com/pyro-ppl/funsor.git@dc478d3ea9ea0c10794e8ba334650e9f3c9f2ea3',
-            # 'funsor[torch]==0.4.0',
+            'funsor[torch] @ git+git://github.com/pyro-ppl/funsor.git@5c5989536ff93a677ae8f0f65c0799b0cf7b39b8',
         ],
     },
     python_requires='>=3.6',
