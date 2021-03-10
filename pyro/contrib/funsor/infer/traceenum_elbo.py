@@ -70,7 +70,7 @@ class TraceMarkovEnum_ELBO(ELBO):
         model_terms = terms_from_trace(model_tr)
 
         # build up a lazy expression for the elbo
-        with funsor.terms.lazy:
+        with funsor.terms.eager:
             # identify and contract out auxiliary variables in the model with partial_sum_product
             contracted_factors, uncontracted_factors = [], []
             for f in model_terms["log_factors"]:
@@ -92,6 +92,7 @@ class TraceMarkovEnum_ELBO(ELBO):
             costs += [-f for f in guide_terms["log_factors"]]  # guide costs: -logq
 
             plate_vars = guide_terms["plate_vars"] | model_terms["plate_vars"]
+            plate_to_step = {**guide_terms["plate_to_step"], **model_terms["plate_to_step"]}
             # compute the marginal logq in the guide corresponding to each cost term
             targets = dict()
             for cost in costs:
@@ -109,7 +110,7 @@ class TraceMarkovEnum_ELBO(ELBO):
                 logzqs = funsor.sum_product.modified_partial_sum_product(
                     funsor.ops.logaddexp, funsor.ops.add,
                     guide_terms["log_measures"] + list(targets.values()),
-                    plate_to_step=guide_terms["plate_to_step"],
+                    plate_to_step=plate_to_step,
                     eliminate=(plate_vars | guide_terms["measure_vars"])
                 )
                 logzq = reduce(funsor.ops.add, logzqs, funsor.terms.Number(0.0))
