@@ -597,5 +597,5 @@ def test_guide_enumerated_elbo(model, guide, data, history):
         actual_grads = (value.grad for name, value in pyro.get_param_store().named_parameters())
 
         assert_close(actual_loss, expected_loss)
-        #  for actual_grad, expected_grad in zip(actual_grads, expected_grads):
-        #      assert_close(actual_grad, expected_grad)
+        for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+            assert_close(actual_grad, expected_grad)

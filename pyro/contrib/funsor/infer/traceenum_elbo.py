@@ -113,7 +113,7 @@ class TraceMarkovEnum_ELBO(ELBO):
                     plate_to_step=plate_to_step,
                     eliminate=(plate_vars | guide_terms["measure_vars"])
                 )
-                logzq = reduce(funsor.ops.add, logzqs, funsor.terms.Number(0.0))
+                logzq = reduce(funsor.ops.add, logzqs)
             marginals = tape.adjoint(funsor.ops.logaddexp, funsor.ops.add, logzq, tuple(targets.values()))
             # finally, integrate out guide variables in the elbo and all plates
             elbo = to_funsor(0, output=funsor.Real)
@@ -145,7 +145,7 @@ class TraceEnum_ELBO(ELBO):
         model_terms = terms_from_trace(model_tr)
 
         # build up a lazy expression for the elbo
-        with funsor.terms.lazy:
+        with funsor.terms.eager:
             # identify and contract out auxiliary variables in the model with partial_sum_product
             contracted_factors, uncontracted_factors = [], []
             for f in model_terms["log_factors"]:
