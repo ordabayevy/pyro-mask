@@ -118,7 +118,7 @@ def _compute_model_factors(model_trace, guide_trace):
         marginal_costs = OrderedDict((t, [site["packed"]["log_prob"] for site in sites_t])
                                      for t, sites_t in cost_sites.items())
         return marginal_costs, log_factors, ordering, enum_dims, scale
-    _check_model_guide_enumeration_constraint(enum_sites, guide_trace)
+    # _check_model_guide_enumeration_constraint(enum_sites, guide_trace)
 
     # Marginalize out all variables that have been enumerated in the model.
     marginal_costs = OrderedDict()
