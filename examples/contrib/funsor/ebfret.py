@@ -217,7 +217,8 @@ def main(args):
     logging.info("Step\tLoss")
     for step in range(args.num_steps):
         loss = svi.step(data, 3, args.vectorized)
-        logging.info("{: >5d}\t{}".format(step, loss))
+        if not step % 20:
+            logging.info("{: >5d}\t{}".format(step, loss))
 
     if args.jit and args.time_compilation:
         logging.debug(
@@ -228,6 +229,7 @@ def main(args):
     # excluding the prior term so our results are comparable across models.
     train_loss = elbo.loss(model, guide, data, 3, False)
     logging.info("training loss = {}".format(train_loss))
+    logging.info("m0 = {}".format(pyro.param("m0").data))
 
 
 if __name__ == "__main__":
