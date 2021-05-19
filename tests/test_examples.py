@@ -9,7 +9,13 @@ from subprocess import check_call
 import pytest
 import torch
 
-from tests.common import EXAMPLES_DIR, requires_cuda, requires_funsor, requires_horovod, xfail_param
+from tests.common import (
+    EXAMPLES_DIR,
+    requires_cuda,
+    requires_funsor,
+    requires_horovod,
+    xfail_param,
+)
 
 logger = logging.getLogger(__name__)
 pytestmark = pytest.mark.stage('test_examples')
@@ -53,6 +59,10 @@ CPU_EXAMPLES = [
     'contrib/forecast/bart.py --num-steps=2 --stride=99999',
     'contrib/gp/sv-dkl.py --epochs=1 --num-inducing=4 --batch-size=1000',
     'contrib/gp/sv-dkl.py --binary --epochs=1 --num-inducing=4 --batch-size=1000',
+    'contrib/mue/FactorMuE.py --test --small --include-stop --no-plots --no-save',
+    'contrib/mue/FactorMuE.py --test --small -ard -idfac --no-substitution-matrix --no-plots --no-save',
+    'contrib/mue/ProfileHMM.py --test --small --no-plots --no-save',
+    'contrib/mue/ProfileHMM.py --test --small --include-stop --no-plots --no-save',
     'contrib/oed/ab_test.py --num-vi-steps=10 --num-bo-steps=2',
     'contrib/timeseries/gp_models.py -m imgp --test --num-steps=2',
     'contrib/timeseries/gp_models.py -m lcmgp --test --num-steps=2',
@@ -136,6 +146,10 @@ CUDA_EXAMPLES = [
     'contrib/epidemiology/regional.py --nojit -t=2 -w=2 -n=4 -r=3 -d=20 -p=1000 -f 2 --cuda',
     'contrib/epidemiology/regional.py --nojit -t=2 -w=2 -n=4 -r=3 -d=20 -p=1000 -f 2 --haar --cuda',
     'contrib/gp/sv-dkl.py --epochs=1 --num-inducing=4 --cuda',
+    'contrib/mue/FactorMuE.py --test --small --include-stop --no-plots --no-save --cuda --cpu-data --pin-mem',
+    'contrib/mue/FactorMuE.py --test --small -ard -idfac --no-substitution-matrix --no-plots --no-save --cuda',
+    'contrib/mue/ProfileHMM.py --test --small --no-plots --no-save --cuda --cpu-data --pin-mem',
+    'contrib/mue/ProfileHMM.py --test --small --include-stop --no-plots --no-save --cuda',
     'lkj.py --n=50 --num-chains=1 --warmup-steps=100 --num-samples=200 --cuda',
     'dmm.py --num-epochs=1 --cuda',
     'dmm.py --num-epochs=1 --num-iafs=1 --cuda',
@@ -187,14 +201,16 @@ CUDA_EXAMPLES = [
 ]
 
 
-def xfail_jit(*args):
-    return pytest.param(*args, marks=[pytest.mark.xfail(reason="not jittable"),
+def xfail_jit(*args, **kwargs):
+    reason = kwargs.pop("reason", "not jittable")
+    return pytest.param(*args, marks=[pytest.mark.xfail(reason=reason),
                                       pytest.mark.skipif('CI' in os.environ, reason='slow test')])
 
 
 JIT_EXAMPLES = [
     'air/main.py --num-steps=1 --jit',
-    'baseball.py --num-samples=200 --warmup-steps=100 --jit',
+    xfail_jit('baseball.py --num-samples=200 --warmup-steps=100 --jit',
+              reason='unreproducible RuntimeError on CI'),
     'contrib/autoname/mixture.py --num-epochs=1 --jit',
     'contrib/cevae/synthetic.py --num-epochs=1 --jit',
     'contrib/epidemiology/sir.py --jit -np=128 -t=2 -w=2 -n=4 -d=20 -p=1000 -f 2',
@@ -202,6 +218,10 @@ JIT_EXAMPLES = [
     'contrib/epidemiology/regional.py --jit -t=2 -w=2 -n=4 -r=3 -d=20 -p=1000 -f 2',
     'contrib/epidemiology/regional.py --jit -ss=2 -n=4 -r=3 -d=20 -p=1000 -f 2 --svi',
     xfail_jit('contrib/gp/sv-dkl.py --epochs=1 --num-inducing=4 --jit'),
+    'contrib/mue/FactorMuE.py --test --small --include-stop --no-plots --no-save --jit',
+    'contrib/mue/FactorMuE.py --test --small -ard -idfac --no-substitution-matrix --no-plots --no-save --jit',
+    'contrib/mue/ProfileHMM.py --test --small --no-plots --no-save --jit',
+    'contrib/mue/ProfileHMM.py --test --small --include-stop --no-plots --no-save --jit',
     xfail_jit('dmm.py --num-epochs=1 --jit'),
     xfail_jit('dmm.py --num-epochs=1 --num-iafs=1 --jit'),
     'eight_schools/mcmc.py --num-samples=500 --warmup-steps=100 --jit',
@@ -221,7 +241,7 @@ JIT_EXAMPLES = [
     'minipyro.py --jit',
     'sir_hmc.py -t=2 -w=2 -n=4 -d=2 -m=1 --enum --jit',
     'sir_hmc.py -t=2 -w=2 -n=4 -d=2 -p=10000 --sequential --jit',
-    'sir_hmc.py -t=2 -w=2 -n=4 -p=10000 --jit',
+    xfail_jit('sir_hmc.py -t=2 -w=2 -n=4 -p=10000 --jit'),
     xfail_jit('vae/ss_vae_M2.py --num-epochs=1 --aux-loss --jit'),
     'vae/ss_vae_M2.py --num-epochs=1 --enum-discrete=parallel --jit',
     'vae/ss_vae_M2.py --num-epochs=1 --enum-discrete=sequential --jit',

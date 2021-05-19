@@ -14,7 +14,7 @@ Pyro Documentation
    :caption: Pyro Core:
 
    getting_started
-   primitives 
+   primitives
    inference
    distributions
    parameters
@@ -22,6 +22,7 @@ Pyro Documentation
    optimization
    poutine
    ops
+   testing
 
 .. toctree::
    :glob:
@@ -38,6 +39,7 @@ Pyro Documentation
    contrib.funsor
    contrib.gp
    contrib.minipyro
+   contrib.mue
    contrib.oed
    contrib.randomvariable
    contrib.timeseries
@@ -51,4 +53,3 @@ Indices and tables
 * :ref:`search`
 
 .. * :ref:`modindex`
-

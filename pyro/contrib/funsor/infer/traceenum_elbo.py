@@ -5,13 +5,24 @@ import contextlib
 from functools import reduce
 
 import funsor
-
-from pyro.distributions.util import copy_docs_from
-from pyro.infer import TraceEnum_ELBO as _OrigTraceEnum_ELBO
+from funsor.adjoint import AdjointTape
 
 from pyro.contrib.funsor import to_data, to_funsor
 from pyro.contrib.funsor.handlers import enum, plate, replay, trace
 from pyro.contrib.funsor.infer.elbo import ELBO, Jit_ELBO
+from pyro.distributions.util import copy_docs_from
+from pyro.infer import TraceEnum_ELBO as _OrigTraceEnum_ELBO
+
+
+# Work around a bug in unfold_contraction_generic_tuple interacting with
+# Approximate introduced in https://github.com/pyro-ppl/funsor/pull/488 .
+# Once fixed, this can be replaced by funsor.optimizer.apply_optimizer().
+def apply_optimizer(x):
+    with funsor.interpretations.normalize:
+        expr = funsor.interpreter.reinterpret(x)
+
+    with funsor.optimizer.optimize_base:
+        return funsor.interpreter.reinterpret(expr)
 
 
 def terms_from_trace(tr):
@@ -70,7 +81,7 @@ class TraceMarkovEnum_ELBO(ELBO):
         model_terms = terms_from_trace(model_tr)
 
         # build up a lazy expression for the elbo
-        with funsor.interpreter.interpretation(funsor.terms.eager):
+        with funsor.terms.eager:
             # identify and contract out auxiliary variables in the model with partial_sum_product
             contracted_factors, uncontracted_factors = [], []
             for f in model_terms["log_factors"]:
@@ -81,7 +92,7 @@ class TraceMarkovEnum_ELBO(ELBO):
             # incorporate the effects of subsampling and handlers.scale through a common scale factor
             markov_dims = frozenset({
                     plate for plate, step in model_terms["plate_to_step"].items() if step})
-            contracted_costs = [model_terms["scale"] * f for f in funsor.sum_product.modified_partial_sum_product(
+            contracted_costs = [model_terms["scale"] * f for f in funsor.sum_product.dynamic_partial_sum_product(
                 funsor.ops.logaddexp, funsor.ops.add,
                 model_terms["log_measures"] + contracted_factors,
                 plate_to_step=model_terms["plate_to_step"],
@@ -108,8 +119,8 @@ class TraceMarkovEnum_ELBO(ELBO):
             elbo = reduce(funsor.ops.add, elbo_terms)
 
         # evaluate the elbo, using memoize to share tensor computation where possible
-        with funsor.memoize.memoize():
-            return -to_data(funsor.optimizer.apply_optimizer(elbo))
+        with funsor.interpretations.memoize():
+            return -to_data(apply_optimizer(elbo))
 
 
 @copy_docs_from(_OrigTraceEnum_ELBO)
@@ -128,7 +139,7 @@ class TraceEnum_ELBO(ELBO):
         model_terms = terms_from_trace(model_tr)
 
         # build up a lazy expression for the elbo
-        with funsor.interpreter.interpretation(funsor.terms.lazy):
+        with funsor.terms.lazy:
             # identify and contract out auxiliary variables in the model with partial_sum_product
             contracted_factors, uncontracted_factors = [], []
             for f in model_terms["log_factors"]:
@@ -143,28 +154,53 @@ class TraceEnum_ELBO(ELBO):
                 plates=model_terms["plate_vars"], eliminate=model_terms["measure_vars"]
             )]
 
+            # accumulate costs from model (logp) and guide (-logq)
             costs = contracted_costs + uncontracted_factors  # model costs: logp
             costs += [-f for f in guide_terms["log_factors"]]  # guide costs: -logq
 
-            # finally, integrate out guide variables in the elbo and all plates
+            # compute expected cost
+            # Cf. pyro.infer.util.Dice.compute_expectation()
+            # https://github.com/pyro-ppl/pyro/blob/0.3.0/pyro/infer/util.py#L212
+            # TODO Replace this with funsor.Expectation
             plate_vars = guide_terms["plate_vars"] | model_terms["plate_vars"]
+            # compute the marginal logq in the guide corresponding to each cost term
+            targets = dict()
+            for cost in costs:
+                input_vars = frozenset(cost.inputs)
+                if input_vars not in targets:
+                    targets[input_vars] = funsor.Tensor(
+                        funsor.ops.new_zeros(
+                            funsor.tensor.get_default_prototype(),
+                            tuple(v.size for v in cost.inputs.values()),
+                        ),
+                        cost.inputs,
+                        cost.dtype,
+                    )
+            with AdjointTape() as tape:
+                logzq = funsor.sum_product.sum_product(
+                    funsor.ops.logaddexp, funsor.ops.add,
+                    guide_terms["log_measures"] + list(targets.values()),
+                    plates=plate_vars,
+                    eliminate=(plate_vars | guide_terms["measure_vars"])
+                )
+            marginals = tape.adjoint(funsor.ops.logaddexp, funsor.ops.add, logzq, tuple(targets.values()))
+            # finally, integrate out guide variables in the elbo and all plates
             elbo = to_funsor(0, output=funsor.Real)
             for cost in costs:
-                # compute the marginal logq in the guide corresponding to this cost term
-                log_prob = funsor.sum_product.sum_product(
-                    funsor.ops.logaddexp, funsor.ops.add,
-                    guide_terms["log_measures"],
-                    plates=plate_vars,
-                    eliminate=(plate_vars | guide_terms["measure_vars"]) - frozenset(cost.inputs)
-                )
-                # compute the expected cost term E_q[logp] or E_q[-logq] using the marginal logq for q
-                elbo_term = funsor.Integrate(log_prob, cost, guide_terms["measure_vars"] & frozenset(cost.inputs))
+                target = targets[frozenset(cost.inputs)]
+                logzq_local = marginals[target].reduce(funsor.ops.logaddexp, frozenset(cost.inputs) - plate_vars)
+                log_prob = marginals[target] - logzq_local
+                elbo_term = funsor.Integrate(log_prob, cost, guide_terms["measure_vars"] & frozenset(log_prob.inputs))
                 elbo += elbo_term.reduce(funsor.ops.add, plate_vars & frozenset(cost.inputs))
 
         # evaluate the elbo, using memoize to share tensor computation where possible
-        with funsor.memoize.memoize():
-            return -to_data(funsor.optimizer.apply_optimizer(elbo))
+        with funsor.interpretations.memoize():
+            return -to_data(apply_optimizer(elbo))
 
 
 class JitTraceEnum_ELBO(Jit_ELBO, TraceEnum_ELBO):
+    pass
+
+
+class JitTraceMarkovEnum_ELBO(Jit_ELBO, TraceMarkovEnum_ELBO):
     pass
