@@ -300,7 +300,10 @@ class Dice:
                         cost = cost.masked_select(mask)
                     else:
                         cost, prob = packed.broadcast_all(cost, prob)
-                    expected_cost = expected_cost + scale * torch.tensordot(prob, cost, prob.dim())
+                    if prob.dim():
+                        expected_cost = expected_cost + scale * torch.tensordot(prob, cost, prob.dim())
+                    else:
+                        expected_cost = expected_cost + scale * prob * cost
 
         LAST_CACHE_SIZE[0] = count_cached_ops(cache)
         return expected_cost
