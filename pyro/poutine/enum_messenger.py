@@ -141,18 +141,18 @@ class EnumMessenger(Messenger):
         :param msg: current message at a trace site.
         :returns: a sample from the stochastic function at the site.
         """
+        param_dims = _ENUM_ALLOCATOR.dim_to_id.copy()  # enum dim -> unique id
+        self._param_dims[msg["name"]] = param_dims
         if msg["done"] or not isinstance(msg["fn"], TorchDistributionMixin):
             return
 
         # Compute upstream dims in scope; these are unsafe to use for this site's target_dim.
         scope = msg["infer"].get("_markov_scope")  # site name -> markov depth
-        param_dims = _ENUM_ALLOCATOR.dim_to_id.copy()  # enum dim -> unique id
         if scope is not None:
             for name, depth in scope.items():
                 if self._markov_depths[name] == depth:  # hide sites whose markov context has exited
                     param_dims.update(self._value_dims[name])
             self._markov_depths[msg["name"]] = msg["infer"]["_markov_depth"]
-        self._param_dims[msg["name"]] = param_dims
         if msg["is_observed"] or msg["infer"].get("enumerate") != "parallel":
             return
 
