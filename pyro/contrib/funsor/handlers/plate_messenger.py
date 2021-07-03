@@ -300,14 +300,14 @@ class VectorizedMarkovMessenger(NamedMessenger):
         self._suffixes = []
         for self._suffix in range(self.history):
             self._suffixes.append(self._suffix)
-            yield self._suffix
+            yield (self._suffix, self._suffix)
         with self:
             with IndepMessenger(name=self.name, size=self.size-self.history, dim=self.dim) as time:
                 time_indices = [time.indices+i for i in range(self.history+1)]
                 time_slices = [slice(i, self.size-self.history+i) for i in range(self.history+1)]
                 self._suffixes.extend(time_slices)
                 for self._suffix, self._indices in zip(time_slices, time_indices):
-                    yield self._indices
+                    yield (self._suffix, self._indices)
         self._markov_chain(name=self.name, markov_vars=self._markov_vars, suffixes=self._suffixes)
 
     def _pyro_sample(self, msg):
@@ -315,9 +315,9 @@ class VectorizedMarkovMessenger(NamedMessenger):
             return
         BroadcastMessenger._pyro_sample(msg)
         # replace tensor suffix with a nice slice suffix
-        if isinstance(self._suffix, slice):
-            assert msg["name"].endswith(str(self._indices))
-            msg["name"] = msg["name"][:-len(str(self._indices))] + str(self._suffix)
+        #  if isinstance(self._suffix, slice):
+        #      assert msg["name"].endswith(str(self._indices))
+        #      msg["name"] = msg["name"][:-len(str(self._indices))] + str(self._suffix)
         if str(self._suffix) != str(self._suffixes[-1]):
             # _do_not_score: record these sites when tracing for use with replay,
             # but do not include them in ELBO computation.
