@@ -232,6 +232,13 @@ LKJCorrCholesky
     :undoc-members:
     :show-inheritance:
 
+Logistic
+--------
+.. autoclass:: pyro.distributions.Logistic
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 MaskedDistribution
 ------------------
 .. autoclass:: pyro.distributions.MaskedDistribution
@@ -326,6 +333,27 @@ Rejector
 SineBivariateVonMises
 ---------------------
 .. autoclass:: pyro.distributions.SineBivariateVonMises
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+SineSkewed
+----------
+.. autoclass:: pyro.distributions.SineSkewed
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+SkewLogistic
+------------
+.. autoclass:: pyro.distributions.SkewLogistic
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+SoftAsymmetricLaplace
+---------------------
+.. autoclass:: pyro.distributions.SoftAsymmetricLaplace
     :members:
     :undoc-members:
     :show-inheritance:

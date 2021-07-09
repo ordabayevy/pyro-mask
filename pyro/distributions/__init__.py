@@ -7,7 +7,10 @@ from pyro.distributions.torch import *  # noqa F403
 # isort: split
 
 from pyro.distributions.affine_beta import AffineBeta
-from pyro.distributions.asymmetriclaplace import AsymmetricLaplace
+from pyro.distributions.asymmetriclaplace import (
+    AsymmetricLaplace,
+    SoftAsymmetricLaplace,
+)
 from pyro.distributions.avf_mvn import AVFMultivariateNormal
 from pyro.distributions.coalescent import (
     CoalescentRateLikelihood,
@@ -46,6 +49,7 @@ from pyro.distributions.hmm import (
 from pyro.distributions.improper_uniform import ImproperUniform
 from pyro.distributions.inverse_gamma import InverseGamma
 from pyro.distributions.lkj import LKJ, LKJCorrCholesky
+from pyro.distributions.logistic import Logistic, SkewLogistic
 from pyro.distributions.mixture import MaskedMixture
 from pyro.distributions.multivariate_studentt import MultivariateStudentT
 from pyro.distributions.omt_mvn import OMTMultivariateNormal
@@ -60,6 +64,7 @@ from pyro.distributions.relaxed_straight_through import (
     RelaxedOneHotCategoricalStraightThrough,
 )
 from pyro.distributions.sine_bivariate_von_mises import SineBivariateVonMises
+from pyro.distributions.sine_skewed import SineSkewed
 from pyro.distributions.softlaplace import SoftLaplace
 from pyro.distributions.spanning_tree import SpanningTree
 from pyro.distributions.stable import Stable
@@ -115,9 +120,10 @@ __all__ = [
     "ImproperUniform",
     "IndependentHMM",
     "InverseGamma",
-    "LinearHMM",
     "LKJ",
     "LKJCorrCholesky",
+    "LinearHMM",
+    "Logistic",
     "MaskedDistribution",
     "MaskedMixture",
     "MixtureOfDiagNormals",
@@ -132,7 +138,10 @@ __all__ = [
     "RelaxedBernoulliStraightThrough",
     "RelaxedOneHotCategoricalStraightThrough",
     "SineBivariateVonMises",
+    "SineSkewed",
+    "SkewLogistic",
     "SoftLaplace",
+    "SoftAsymmetricLaplace",
     "SpanningTree",
     "Stable",
     "TorchDistribution",
