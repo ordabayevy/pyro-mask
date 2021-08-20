@@ -3,7 +3,10 @@
 
 import functools
 
-from pyro.params.param_store import _MODULE_NAMESPACE_DIVIDER, ParamStoreDict  # noqa: F401
+from pyro.params.param_store import (  # noqa: F401
+    _MODULE_NAMESPACE_DIVIDER,
+    ParamStoreDict,
+)
 
 # the global pyro stack
 _PYRO_STACK = []
@@ -19,6 +22,7 @@ class _DimAllocator:
 
     Note that dimensions are indexed from the right, e.g. -1, -2.
     """
+
     def __init__(self):
         self._stack = []  # in reverse orientation of log_prob.shape
 
@@ -36,15 +40,26 @@ class _DimAllocator:
             while -dim <= len(self._stack) and self._stack[-1 - dim] is not None:
                 dim -= 1
         elif dim >= 0:
-            raise ValueError('Expected dim < 0 to index from the right, actual {}'.format(dim))
+            raise ValueError(
+                "Expected dim < 0 to index from the right, actual {}".format(dim)
+            )
 
         # Allocate the requested dimension.
         while dim < -len(self._stack):
             self._stack.append(None)
         if self._stack[-1 - dim] is not None:
-            raise ValueError('\n'.join([
-                'at plates "{}" and "{}", collide at dim={}'.format(name, self._stack[-1 - dim], dim),
-                '\nTry moving the dim of one plate to the left, e.g. dim={}'.format(dim - 1)]))
+            raise ValueError(
+                "\n".join(
+                    [
+                        'at plates "{}" and "{}", collide at dim={}'.format(
+                            name, self._stack[-1 - dim], dim
+                        ),
+                        "\nTry moving the dim of one plate to the left, e.g. dim={}".format(
+                            dim - 1
+                        ),
+                    ]
+                )
+            )
         self._stack[-1 - dim] = name
         return dim
 
@@ -71,6 +86,7 @@ class _EnumAllocator:
     Note that dimensions are indexed from the right, e.g. -1, -2.
     Note that ids are simply nonnegative integers here.
     """
+
     def set_first_available_dim(self, first_available_dim):
         """
         Set the first available dim, which should be to the left of all
@@ -102,8 +118,10 @@ class _EnumAllocator:
         self.next_available_id += 1
 
         dim = self.next_available_dim
-        if dim == -float('inf'):
-            raise ValueError("max_plate_nesting must be set to a finite value for parallel enumeration")
+        if dim == -float("inf"):
+            raise ValueError(
+                "max_plate_nesting must be set to a finite value for parallel enumeration"
+            )
         if scope_dims is None:
             # allocate a new global dimension
             self.next_available_dim -= 1
@@ -126,6 +144,7 @@ class NonlocalExit(Exception):
 
     Used by poutine.EscapeMessenger to return site information.
     """
+
     def __init__(self, site, *args, **kwargs):
         """
         :param site: message at a pyro site constructor.
@@ -231,6 +250,7 @@ def effectful(fn=None, type=None):
     assert type is not None, "must provide a type label for operation {}".format(fn)
     assert type != "message", "cannot use 'message' as keyword"
 
+    @functools.wraps(fn)
     def _fn(*args, **kwargs):
 
         name = kwargs.pop("name", None)
@@ -261,5 +281,56 @@ def effectful(fn=None, type=None):
             # apply the stack and return its return value
             apply_stack(msg)
             return msg["value"]
+
     _fn._is_effectful = True
     return _fn
+
+
+def _inspect():
+    """
+    EXPERIMENTAL Inspect the Pyro stack.
+
+    .. warning:: The format of the returned message may change at any time and
+        does not guarantee backwards compatibility.
+
+    :returns: A message with all effects applied.
+    :rtype: dict
+    """
+    msg = {
+        "type": "inspect",
+        "name": "_pyro_inspect",
+        "fn": lambda: True,
+        "is_observed": False,
+        "args": (),
+        "kwargs": {},
+        "value": None,
+        "infer": {"_do_not_trace": True},
+        "scale": 1.0,
+        "mask": None,
+        "cond_indep_stack": (),
+        "done": False,
+        "stop": False,
+        "continuation": None,
+    }
+    apply_stack(msg)
+    return msg
+
+
+def get_mask():
+    """
+    Records the effects of enclosing ``poutine.mask`` handlers.
+
+    This is useful for avoiding expensive ``pyro.factor()`` computations during
+    prediction, when the log density need not be computed, e.g.::
+
+        def model():
+            # ...
+            if poutine.get_mask() is not False:
+                log_density = my_expensive_computation()
+                pyro.factor("foo", log_density)
+            # ...
+
+    :returns: The mask.
+    :rtype: None, bool, or torch.Tensor
+    """
+    return _inspect()["mask"]

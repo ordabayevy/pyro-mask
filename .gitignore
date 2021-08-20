@@ -4,11 +4,13 @@ run_outputs*
 data
 .data
 results
+*.csv
 examples/*/processed
 examples/*/results
 examples/*/raw
 examples/dmm/*.pkl
 examples/*.csv
+examples/*.pdf
 examples/mixed_hmm/*csv
 pyro/contrib/examples/processed
 pyro/contrib/examples/results
@@ -17,6 +19,12 @@ pyro/_version.py
 processed
 raw
 *.pkl
+*.fasta
+baseline_net_q1.pth
+cvae_net_q1.pth
+cvae_plot_q1.png
+prep_seal_data.csv
+results.csv
 
 # Logs
 logs
@@ -80,7 +88,6 @@ coverage.xml
 *,cover
 .hypothesis/
 *.out
-adam.unittest.save
 
 # Translations
 *.mo
@@ -136,3 +143,6 @@ ENV/
 *.swo
 *.swp
 *~
+
+# mypy cache
+.mypy_cache

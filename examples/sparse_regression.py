@@ -2,20 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import math
 
 import numpy as np
 import torch
-import math
+from torch.optim import Adam
 
 import pyro
 import pyro.distributions as dist
 from pyro import poutine
-from pyro.infer.autoguide import AutoDelta
 from pyro.infer import Trace_ELBO
-from pyro.infer.autoguide import init_to_median
-
-from torch.optim import Adam
-
+from pyro.infer.autoguide import AutoDelta, init_to_median
 
 """
 We demonstrate how to do sparse linear regression using a variant of the
@@ -44,8 +41,7 @@ References
 """
 
 
-pyro.enable_validation(True)
-torch.set_default_tensor_type('torch.FloatTensor')
+torch.set_default_tensor_type("torch.FloatTensor")
 
 
 def dot(X, Z):
@@ -64,30 +60,34 @@ def kernel(X, Z, eta1, eta2, c):
 
 # Most of the model code is concerned with constructing the sparsity inducing prior.
 def model(X, Y, hypers, jitter=1.0e-4):
-    S, P, N = hypers['expected_sparsity'], X.size(1), X.size(0)
+    S, P, N = hypers["expected_sparsity"], X.size(1), X.size(0)
 
-    sigma = pyro.sample("sigma", dist.HalfNormal(hypers['alpha3']))
+    sigma = pyro.sample("sigma", dist.HalfNormal(hypers["alpha3"]))
     phi = sigma * (S / math.sqrt(N)) / (P - S)
     eta1 = pyro.sample("eta1", dist.HalfCauchy(phi))
 
-    msq = pyro.sample("msq", dist.InverseGamma(hypers['alpha1'], hypers['beta1']))
-    xisq = pyro.sample("xisq", dist.InverseGamma(hypers['alpha2'], hypers['beta2']))
+    msq = pyro.sample("msq", dist.InverseGamma(hypers["alpha1"], hypers["beta1"]))
+    xisq = pyro.sample("xisq", dist.InverseGamma(hypers["alpha2"], hypers["beta2"]))
 
     eta2 = eta1.pow(2.0) * xisq.sqrt() / msq
 
-    lam = pyro.sample("lambda", dist.HalfCauchy(torch.ones(P, device=X.device)).to_event(1))
+    lam = pyro.sample(
+        "lambda", dist.HalfCauchy(torch.ones(P, device=X.device)).to_event(1)
+    )
     kappa = msq.sqrt() * lam / (msq + (eta1 * lam).pow(2.0)).sqrt()
     kX = kappa * X
 
-    # sample the observation noise
-    var_obs = pyro.sample("var_obs", dist.InverseGamma(hypers['alpha_obs'], hypers['beta_obs']))
-
     # compute the kernel for the given hyperparameters
-    k = kernel(kX, kX, eta1, eta2, hypers['c']) + (var_obs + jitter) * torch.eye(N, device=X.device)
+    k = kernel(kX, kX, eta1, eta2, hypers["c"]) + (sigma ** 2 + jitter) * torch.eye(
+        N, device=X.device
+    )
 
     # observe the outputs Y
-    pyro.sample("Y", dist.MultivariateNormal(torch.zeros(N, device=X.device), covariance_matrix=k),
-                obs=Y)
+    pyro.sample(
+        "Y",
+        dist.MultivariateNormal(torch.zeros(N, device=X.device), covariance_matrix=k),
+        obs=Y,
+    )
 
 
 """
@@ -96,8 +96,10 @@ as for quadratic coefficients theta_ij for a given (in our case MAP) estimate of
 hyperparameters (eta1, xisq, ...).
 Compare to theorem 5.1 in reference [1].
 """
+
+
 @torch.no_grad()
-def compute_posterior_stats(X, Y, msq, lam, eta1, xisq, c, var_obs, jitter=1.0e-4):
+def compute_posterior_stats(X, Y, msq, lam, eta1, xisq, c, sigma, jitter=1.0e-4):
     N, P = X.shape
 
     # prepare for computation of posterior statistics for singleton weights
@@ -113,25 +115,39 @@ def compute_posterior_stats(X, Y, msq, lam, eta1, xisq, c, var_obs, jitter=1.0e-
     kprobe = kprobe.reshape(-1, P)
 
     # compute various kernels
-    k_xx = kernel(kX, kX, eta1, eta2, c) + (jitter + var_obs) * torch.eye(N, dtype=X.dtype, device=X.device)
+    k_xx = kernel(kX, kX, eta1, eta2, c) + (jitter + sigma ** 2) * torch.eye(
+        N, dtype=X.dtype, device=X.device
+    )
     k_xx_inv = torch.inverse(k_xx)
     k_probeX = kernel(kprobe, kX, eta1, eta2, c)
     k_prbprb = kernel(kprobe, kprobe, eta1, eta2, c)
 
     # compute mean and variance for singleton weights
     vec = torch.tensor([0.50, -0.50], dtype=X.dtype, device=X.device)
-    mu = torch.matmul(k_probeX, torch.matmul(k_xx_inv, Y).unsqueeze(-1)).squeeze(-1).reshape(P, 2)
+    mu = (
+        torch.matmul(k_probeX, torch.matmul(k_xx_inv, Y).unsqueeze(-1))
+        .squeeze(-1)
+        .reshape(P, 2)
+    )
     mu = (mu * vec).sum(-1)
 
     var = k_prbprb - torch.matmul(k_probeX, torch.matmul(k_xx_inv, k_probeX.t()))
     var = var.reshape(P, 2, P, 2).diagonal(dim1=-4, dim2=-2)  # 2 2 P
-    std = ((var * vec.unsqueeze(-1)).sum(-2) * vec.unsqueeze(-1)).sum(-2).clamp(min=0.0).sqrt()
+    std = (
+        ((var * vec.unsqueeze(-1)).sum(-2) * vec.unsqueeze(-1))
+        .sum(-2)
+        .clamp(min=0.0)
+        .sqrt()
+    )
 
     # select active dimensions (those that are non-zero with sufficient statistical significance)
     active_dims = (((mu - 4.0 * std) > 0.0) | ((mu + 4.0 * std) < 0.0)).bool()
-    active_dims = active_dims.nonzero().squeeze(-1)
+    active_dims = active_dims.nonzero(as_tuple=False).squeeze(-1)
 
-    print("Identified the following active dimensions:", active_dims.data.numpy().flatten())
+    print(
+        "Identified the following active dimensions:",
+        active_dims.data.numpy().flatten(),
+    )
     print("Mean estimate for active singleton weights:\n", mu[active_dims].data.numpy())
 
     # if there are 0 or 1 active dimensions there are no quadratic weights to be found
@@ -140,7 +156,7 @@ def compute_posterior_stats(X, Y, msq, lam, eta1, xisq, c, var_obs, jitter=1.0e-
         return active_dims.data.numpy(), []
 
     # prep for computation of posterior statistics for quadratic weights
-    left_dims, right_dims = torch.ones(M, M).triu(1).nonzero().t()
+    left_dims, right_dims = torch.ones(M, M).triu(1).nonzero(as_tuple=False).t()
     left_dims, right_dims = active_dims[left_dims], active_dims[right_dims]
 
     probe = torch.zeros(left_dims.size(0), 4, P, dtype=X.dtype, device=X.device)
@@ -159,19 +175,39 @@ def compute_posterior_stats(X, Y, msq, lam, eta1, xisq, c, var_obs, jitter=1.0e-
     # compute mean and covariance for a subset of weights theta_ij (namely those with
     # 'active' dimensions i and j)
     vec = torch.tensor([0.25, -0.25, -0.25, 0.25], dtype=X.dtype, device=X.device)
-    mu = torch.matmul(k_probeX, torch.matmul(k_xx_inv, Y).unsqueeze(-1)).squeeze(-1).reshape(left_dims.size(0), 4)
+    mu = (
+        torch.matmul(k_probeX, torch.matmul(k_xx_inv, Y).unsqueeze(-1))
+        .squeeze(-1)
+        .reshape(left_dims.size(0), 4)
+    )
     mu = (mu * vec).sum(-1)
 
     var = k_prbprb - torch.matmul(k_probeX, torch.matmul(k_xx_inv, k_probeX.t()))
-    var = var.reshape(left_dims.size(0), 4, left_dims.size(0), 4).diagonal(dim1=-4, dim2=-2)
-    std = ((var * vec.unsqueeze(-1)).sum(-2) * vec.unsqueeze(-1)).sum(-2).clamp(min=0.0).sqrt()
+    var = var.reshape(left_dims.size(0), 4, left_dims.size(0), 4).diagonal(
+        dim1=-4, dim2=-2
+    )
+    std = (
+        ((var * vec.unsqueeze(-1)).sum(-2) * vec.unsqueeze(-1))
+        .sum(-2)
+        .clamp(min=0.0)
+        .sqrt()
+    )
 
-    active_quad_dims = (((mu - 4.0 * std) > 0.0) | ((mu + 4.0 * std) < 0.0)) & (mu.abs() > 1.0e-4).bool()
-    active_quad_dims = active_quad_dims.nonzero()
+    active_quad_dims = (((mu - 4.0 * std) > 0.0) | ((mu + 4.0 * std) < 0.0)) & (
+        mu.abs() > 1.0e-4
+    ).bool()
+    active_quad_dims = active_quad_dims.nonzero(as_tuple=False)
 
-    active_quadratic_dims = np.stack([left_dims[active_quad_dims].data.numpy().flatten(),
-                                      right_dims[active_quad_dims].data.numpy().flatten()], axis=1)
-    active_quadratic_dims = np.split(active_quadratic_dims, active_quadratic_dims.shape[0])
+    active_quadratic_dims = np.stack(
+        [
+            left_dims[active_quad_dims].data.numpy().flatten(),
+            right_dims[active_quad_dims].data.numpy().flatten(),
+        ],
+        axis=1,
+    )
+    active_quadratic_dims = np.split(
+        active_quadratic_dims, active_quadratic_dims.shape[0]
+    )
     active_quadratic_dims = [tuple(a.tolist()[0]) for a in active_quadratic_dims]
 
     return active_dims.data.numpy(), active_quadratic_dims
@@ -218,26 +254,33 @@ def get_data(N=20, P=10, S=2, Q=2, sigma_obs=0.15):
 
 def init_loc_fn(site):
     value = init_to_median(site, num_samples=50)
-    # we also make sure the initial observation noise is not too large
+    # we also make sure the initial sigma is not too large.
     # (otherwise we run the danger of getting stuck in bad local optima during optimization).
-    if site["name"] == "var_obs":
-        value = 0.2 * value
+    if site["name"] == "sigma":
+        value = 0.1 * value
     return value
 
 
 def main(args):
     # setup hyperparameters for the model
-    hypers = {'expected_sparsity': max(1.0, args.num_dimensions / 10),
-              'alpha1': 3.0, 'beta1': 1.0, 'alpha2': 3.0, 'beta2': 1.0, 'alpha3': 1.0,
-              'c': 1.0, 'alpha_obs': 3.0, 'beta_obs': 1.0}
+    hypers = {
+        "expected_sparsity": max(1.0, args.num_dimensions / 10),
+        "alpha1": 3.0,
+        "beta1": 1.0,
+        "alpha2": 3.0,
+        "beta2": 1.0,
+        "alpha3": 1.0,
+        "c": 1.0,
+    }
 
     P = args.num_dimensions
     S = args.active_dimensions
     Q = args.quadratic_dimensions
 
     # generate artificial dataset
-    X, Y, expected_thetas, expected_quad_dims = get_data(N=args.num_data, P=P, S=S,
-                                                         Q=Q, sigma_obs=args.sigma)
+    X, Y, expected_thetas, expected_quad_dims = get_data(
+        N=args.num_data, P=P, S=S, Q=Q, sigma_obs=args.sigma
+    )
 
     loss_fn = Trace_ELBO().differentiable_loss
 
@@ -275,7 +318,7 @@ def main(args):
 
         # we manually reduce the learning rate according to this schedule
         if step in [100, 300, 700, 900]:
-            adam.param_groups[0]['lr'] *= 0.2
+            adam.param_groups[0]["lr"] *= 0.2
 
         if step % report_frequency == 0 or step == args.num_steps - 1:
             print("[step %04d]  loss: %.5f" % (step, loss))
@@ -284,11 +327,16 @@ def main(args):
 
     # we do the final computation using double precision
     median = guide.median()  # == mode for MAP inference
-    active_dims, active_quad_dims = \
-        compute_posterior_stats(X.double(), Y.double(), median['msq'].double(),
-                                median['lambda'].double(), median['eta1'].double(),
-                                median['xisq'].double(), torch.tensor(hypers['c']).double(),
-                                median['var_obs'].double())
+    active_dims, active_quad_dims = compute_posterior_stats(
+        X.double(),
+        Y.double(),
+        median["msq"].double(),
+        median["lambda"].double(),
+        median["eta1"].double(),
+        median["xisq"].double(),
+        torch.tensor(hypers["c"]).double(),
+        median["sigma"].double(),
+    )
 
     expected_active_dims = np.arange(S).tolist()
 
@@ -305,23 +353,27 @@ def main(args):
     # We report how well we did, i.e. did we recover the sparse set of coefficients
     # that we expected for our artificial dataset?
     print("[SUMMARY STATS]")
-    print("Singletons (true positive, false positive, false negative): " +
-          "(%d, %d, %d)" % singleton_stats)
-    print("Quadratic  (true positive, false positive, false negative): " +
-          "(%d, %d, %d)" % quad_stats)
+    print(
+        "Singletons (true positive, false positive, false negative): "
+        + "(%d, %d, %d)" % singleton_stats
+    )
+    print(
+        "Quadratic  (true positive, false positive, false negative): "
+        + "(%d, %d, %d)" % quad_stats
+    )
 
 
-if __name__ == '__main__':
-    assert pyro.__version__.startswith('1.2.1')
-    parser = argparse.ArgumentParser(description='Krylov KIT')
-    parser.add_argument('--num-data', type=int, default=750)
-    parser.add_argument('--num-steps', type=int, default=1000)
-    parser.add_argument('--num-dimensions', type=int, default=100)
-    parser.add_argument('--num-restarts', type=int, default=10)
-    parser.add_argument('--sigma', type=float, default=0.05)
-    parser.add_argument('--active-dimensions', type=int, default=10)
-    parser.add_argument('--quadratic-dimensions', type=int, default=5)
-    parser.add_argument('--lr', type=float, default=0.3)
+if __name__ == "__main__":
+    assert pyro.__version__.startswith("1.7.0")
+    parser = argparse.ArgumentParser(description="Krylov KIT")
+    parser.add_argument("--num-data", type=int, default=750)
+    parser.add_argument("--num-steps", type=int, default=1000)
+    parser.add_argument("--num-dimensions", type=int, default=100)
+    parser.add_argument("--num-restarts", type=int, default=10)
+    parser.add_argument("--sigma", type=float, default=0.05)
+    parser.add_argument("--active-dimensions", type=int, default=10)
+    parser.add_argument("--quadratic-dimensions", type=int, default=5)
+    parser.add_argument("--lr", type=float, default=0.3)
     args = parser.parse_args()
 
     main(args)

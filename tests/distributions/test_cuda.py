@@ -5,7 +5,12 @@ import pytest
 import torch
 from torch.autograd import grad
 
-from tests.common import assert_equal, requires_cuda, tensors_default_to, xfail_if_not_implemented
+from tests.common import (
+    assert_equal,
+    requires_cuda,
+    tensors_default_to,
+    xfail_if_not_implemented,
+)
 
 
 @requires_cuda
@@ -19,7 +24,7 @@ def test_sample(dist):
             with xfail_if_not_implemented():
                 cpu_value = dist.pyro_dist(**params).sample()
         except ValueError as e:
-            pytest.xfail('CPU version fails: {}'.format(e))
+            pytest.xfail("CPU version fails: {}".format(e))
         assert not cpu_value.is_cuda
 
         # Compute GPU value.
@@ -40,8 +45,11 @@ def test_rsample(dist):
         # Compute CPU value.
         with tensors_default_to("cpu"):
             params = dist.get_dist_params(idx)
-            grad_params = [key for key, val in params.items()
-                           if torch.is_tensor(val) and val.dtype in (torch.float32, torch.float64)]
+            grad_params = [
+                key
+                for key, val in params.items()
+                if torch.is_tensor(val) and val.dtype in (torch.float32, torch.float64)
+            ]
             for key in grad_params:
                 val = params[key].clone()
                 val.requires_grad = True
@@ -51,7 +59,7 @@ def test_rsample(dist):
                 cpu_value = dist.pyro_dist(**params).rsample()
                 cpu_grads = grad(cpu_value.sum(), [params[key] for key in grad_params])
         except ValueError as e:
-            pytest.xfail('CPU version fails: {}'.format(e))
+            pytest.xfail("CPU version fails: {}".format(e))
         assert not cpu_value.is_cuda
 
         # Compute GPU value.

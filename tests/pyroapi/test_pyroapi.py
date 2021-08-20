@@ -2,11 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
-
 from pyroapi import pyro_backend
 from pyroapi.tests import *  # noqa F401
 
-pytestmark = pytest.mark.stage('unit')
+pytestmark = pytest.mark.stage("unit")
 
 
 @pytest.fixture(params=["pyro", "minipyro"])

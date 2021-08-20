@@ -16,7 +16,7 @@ from pyro.ops.einsum.adjoint import require_backward
 from pyro.ops.rings import MarginalRing
 from pyro.poutine.util import site_is_subsample
 
-_VALIDATION_ENABLED = False
+_VALIDATION_ENABLED = __debug__
 LAST_CACHE_SIZE = [Counter()]  # for profiling
 
 
@@ -66,11 +66,14 @@ def torch_exp(x):
         return math.exp(x)
 
 
-def detach_iterable(iterable):
-    if torch.is_tensor(iterable):
-        return iterable.detach()
-    else:
-        return [var.detach() for var in iterable]
+def torch_sum(tensor, dims):
+    """
+    Like :func:`torch.sum` but sum out dims only if they exist.
+    """
+    assert all(d < 0 for d in dims)
+    leftmost = -tensor.dim()
+    dims = [d for d in dims if leftmost <= d]
+    return tensor.sum(dims) if dims else tensor
 
 
 def zero_grads(tensors):
@@ -89,9 +92,25 @@ def get_plate_stacks(trace):
     an :class:`plate`.  This information is used by :class:`Trace_ELBO` and
     :class:`TraceGraph_ELBO`.
     """
-    return {name: [f for f in node["cond_indep_stack"] if f.vectorized]
-            for name, node in trace.nodes.items()
-            if node["type"] == "sample" and not site_is_subsample(node)}
+    return {
+        name: [f for f in node["cond_indep_stack"] if f.vectorized]
+        for name, node in trace.nodes.items()
+        if node["type"] == "sample" and not site_is_subsample(node)
+    }
+
+
+def get_dependent_plate_dims(sites):
+    """
+    Return a list of unique dims for plates that are not common to all sites.
+    """
+    plate_sets = [
+        site["cond_indep_stack"] for site in sites if site["type"] == "sample"
+    ]
+    all_plates = set().union(*plate_sets)
+    common_plates = all_plates.intersection(*plate_sets)
+    sum_plates = all_plates - common_plates
+    sum_dims = sorted({f.dim for f in sum_plates if f.dim is not None})
+    return sum_dims
 
 
 class MultiFrameTensor(dict):
@@ -109,6 +128,7 @@ class MultiFrameTensor(dict):
         downstream_cost.add(*other_costs.items())  # add in bulk
         summed = downstream_cost.sum_to(target_site["cond_indep_stack"])
     """
+
     def __init__(self, *items):
         super().__init__()
         self.add(*items)
@@ -136,11 +156,13 @@ class MultiFrameTensor(dict):
             while value.shape and value.shape[0] == 1:
                 value = value.squeeze(0)
             total = value if total is None else total + value
-        return total
+        return 0.0 if total is None else total
 
     def __repr__(self):
-        return '%s(%s)' % (type(self).__name__, ",\n\t".join([
-            '({}, ...)'.format(frames) for frames in self]))
+        return "%s(%s)" % (
+            type(self).__name__,
+            ",\n\t".join(["({}, ...)".format(frames) for frames in self]),
+        )
 
 
 def compute_site_dice_factor(site):
@@ -196,8 +218,11 @@ class Dice:
         Ordinal values may be any type that is (1) ``<=`` comparable and (2)
         hashable; the canonical ordinal is a ``frozenset`` of site names.
     """
+
     def __init__(self, guide_trace, ordering):
-        log_denoms = defaultdict(float)  # avoids double-counting when sequentially enumerating
+        log_denoms = defaultdict(
+            float
+        )  # avoids double-counting when sequentially enumerating
         log_probs = defaultdict(list)  # accounts for upstream probabilties
 
         for name, site in guide_trace.nodes.items():
@@ -241,10 +266,12 @@ class Dice:
         # Share computation across all cost terms.
         with shared_intermediates() as cache:
             ring = MarginalRing(cache=cache)
-            expected_cost = 0.
+            expected_cost = 0.0
             for ordinal, cost_terms in costs.items():
                 log_factors = self._get_log_factors(ordinal)
-                scale = math.exp(sum(x for x in log_factors if not isinstance(x, torch.Tensor)))
+                scale = math.exp(
+                    sum(x for x in log_factors if not isinstance(x, torch.Tensor))
+                )
                 log_factors = [x for x in log_factors if isinstance(x, torch.Tensor)]
 
                 # Collect log_prob terms to query for marginal probability.
@@ -269,7 +296,10 @@ class Dice:
                     require_backward(query)
                 root = ring.sumproduct(log_factors, sum_dims)
                 root._pyro_backward()
-                probs = {key: query._pyro_backward_result.exp() for key, query in queries.items()}
+                probs = {
+                    key: query._pyro_backward_result.exp()
+                    for key, query in queries.items()
+                }
 
                 # Aggregate prob * cost terms.
                 for cost in cost_terms:
@@ -280,19 +310,31 @@ class Dice:
                     if torch._C._get_tracing_state() or not mask.all():
                         mask._pyro_dims = prob._pyro_dims
                         cost, prob, mask = packed.broadcast_all(cost, prob, mask)
-                        prob = prob[mask]
-                        cost = cost[mask]
+                        prob = prob.masked_select(mask)
+                        cost = cost.masked_select(mask)
                     else:
                         cost, prob = packed.broadcast_all(cost, prob)
-                    expected_cost = expected_cost + scale * torch.tensordot(prob, cost, prob.dim())
+                    expected_cost = expected_cost + scale * _fulldot(prob, cost)
 
         LAST_CACHE_SIZE[0] = count_cached_ops(cache)
         return expected_cost
 
 
+def _fulldot(x, y):
+    assert x.dim() == y.dim()
+    if x.dim() == 0:
+        return x * y
+    return torch.tensordot(x, y, dims=x.dim())
+
+
 def check_fully_reparametrized(guide_site):
     log_prob, score_function_term, entropy_term = guide_site["score_parts"]
-    fully_rep = (guide_site["fn"].has_rsample and not is_identically_zero(entropy_term) and
-                 is_identically_zero(score_function_term))
+    fully_rep = (
+        guide_site["fn"].has_rsample
+        and not is_identically_zero(entropy_term)
+        and is_identically_zero(score_function_term)
+    )
     if not fully_rep:
-        raise NotImplementedError("All distributions in the guide must be fully reparameterized.")
+        raise NotImplementedError(
+            "All distributions in the guide must be fully reparameterized."
+        )

@@ -1,12 +1,28 @@
 # Copyright (c) 2017-2019 Uber Technologies, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
+import functools
 from abc import ABCMeta, abstractmethod
 
 from pyro.distributions.score_parts import ScoreParts
 
+COERCIONS = []
 
-class Distribution(object, metaclass=ABCMeta):
+
+class DistributionMeta(ABCMeta):
+    def __call__(cls, *args, **kwargs):
+        for coerce_ in COERCIONS:
+            result = coerce_(cls, args, kwargs)
+            if result is not None:
+                return result
+        return super().__call__(*args, **kwargs)
+
+    @property
+    def __wrapped__(cls):
+        return functools.partial(cls.__init__, None)
+
+
+class Distribution(metaclass=DistributionMeta):
     """
     Base class for parameterized probability distributions.
 
@@ -28,6 +44,7 @@ class Distribution(object, metaclass=ABCMeta):
     Take a look at the `examples <http://pyro.ai/examples>`_ to see how they interact
     with inference algorithms.
     """
+
     has_rsample = False
     has_enumerate_support = False
 
@@ -93,11 +110,15 @@ class Distribution(object, metaclass=ABCMeta):
         """
         log_prob = self.log_prob(x, *args, **kwargs)
         if self.has_rsample:
-            return ScoreParts(log_prob=log_prob, score_function=0, entropy_term=log_prob)
+            return ScoreParts(
+                log_prob=log_prob, score_function=0, entropy_term=log_prob
+            )
         else:
             # XXX should the user be able to control inclusion of the entropy term?
             # See Roeder, Wu, Duvenaud (2017) "Sticking the Landing" https://arxiv.org/abs/1703.09194
-            return ScoreParts(log_prob=log_prob, score_function=log_prob, entropy_term=0)
+            return ScoreParts(
+                log_prob=log_prob, score_function=log_prob, entropy_term=0
+            )
 
     def enumerate_support(self, expand=True):
         """
@@ -115,13 +136,15 @@ class Distribution(object, metaclass=ABCMeta):
         :return: An iterator over the distribution's discrete support.
         :rtype: iterator
         """
-        raise NotImplementedError("Support not implemented for {}".format(type(self).__name__))
+        raise NotImplementedError(
+            "Support not implemented for {}".format(type(self).__name__)
+        )
 
     def conjugate_update(self, other):
         """
-        Creates an updated distribution fusing information from another
-        compatible distribution. This is supported by only a few conjugate
-        distributions.
+        EXPERIMENTAL Creates an updated distribution fusing information from
+        another compatible distribution. This is supported by only a few
+        conjugate distributions.
 
         This should satisfy the equation::
 
@@ -146,8 +169,9 @@ class Distribution(object, metaclass=ABCMeta):
             updated distribution of type ``type(self)``, and ``log_normalizer``
             is a :class:`~torch.Tensor` representing the normalization factor.
         """
-        raise NotImplementedError("{} does not support .conjugate_update()"
-                                  .format(type(self).__name__))
+        raise NotImplementedError(
+            "{} does not support .conjugate_update()".format(type(self).__name__)
+        )
 
     def has_rsample_(self, value):
         """
@@ -163,6 +187,32 @@ class Distribution(object, metaclass=ABCMeta):
         :rtype: Distribution
         """
         if not (value is True or value is False):
-            raise ValueError("Expected value in {False,True}, actual {}".format(value))
+            raise ValueError("Expected value in [False,True], actual {}".format(value))
         self.has_rsample = value
         return self
+
+    @property
+    def rv(self):
+        """
+        EXPERIMENTAL Switch to the Random Variable DSL for applying transformations
+        to random variables. Supports either chaining operations or arithmetic
+        operator overloading.
+
+        Example usage::
+
+            # This should be equivalent to an Exponential distribution.
+            Uniform(0, 1).rv.log().neg().dist
+
+            # These two distributions Y1, Y2 should be the same
+            X = Uniform(0, 1).rv
+            Y1 = X.mul(4).pow(0.5).sub(1).abs().neg().dist
+            Y2 = (-abs((4*X)**(0.5) - 1)).dist
+
+
+        :return: A :class: `~pyro.contrib.randomvariable.random_variable.RandomVariable`
+            object wrapping this distribution.
+        :rtype: ~pyro.contrib.randomvariable.random_variable.RandomVariable
+        """
+        from pyro.contrib.randomvariable import RandomVariable
+
+        return RandomVariable(self)

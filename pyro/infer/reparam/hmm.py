@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pyro.distributions as dist
-from pyro.distributions.hmm import LinearHMM
 
 from .reparam import Reparam
 
@@ -53,6 +52,7 @@ class LinearHMMReparam(Reparam):
     :param obs: Optional reparameterizer for the observation distribution.
     :type obs: ~pyro.infer.reparam.reparam.Reparam
     """
+
     def __init__(self, init=None, trans=None, obs=None):
         assert init is None or isinstance(init, Reparam)
         assert trans is None or isinstance(trans, Reparam)
@@ -61,39 +61,102 @@ class LinearHMMReparam(Reparam):
         self.trans = trans
         self.obs = obs
 
-    def __call__(self, name, fn, obs):
-        assert isinstance(fn, LinearHMM)
+    def apply(self, msg):
+        name = msg["name"]
+        fn = msg["fn"]
+        value = msg["value"]
+        is_observed = msg["is_observed"]
+
+        fn, event_dim = self._unwrap(fn)
+        assert isinstance(fn, (dist.LinearHMM, dist.IndependentHMM))
         if fn.duration is None:
-            raise ValueError("LinearHMMReparam requires duration to be specified "
-                             "on targeted LinearHMM distributions")
+            raise ValueError(
+                "LinearHMMReparam requires duration to be specified "
+                "on targeted LinearHMM distributions"
+            )
+
+        # Unwrap IndependentHMM.
+        if isinstance(fn, dist.IndependentHMM):
+            indep_value = None
+            if value is not None:
+                indep_value = value.transpose(-1, -2).unsqueeze(-1)
+            msg = self.apply(
+                {
+                    "name": name,
+                    "fn": fn.base_dist.to_event(1),
+                    "value": indep_value,
+                    "is_observed": is_observed,
+                }
+            )
+            hmm = msg["fn"]
+            hmm = dist.IndependentHMM(hmm.to_event(-1))
+            if msg["value"] is not indep_value:
+                value = msg["value"].squeeze(-1).transpose(-1, -2)
+            return {"fn": hmm, "value": value, "is_observed": is_observed}
 
         # Reparameterize the initial distribution as conditionally Gaussian.
         init_dist = fn.initial_dist
         if self.init is not None:
-            init_dist, _ = self.init("{}_init".format(name), init_dist, None)
+            msg = self.init.apply(
+                {
+                    "name": f"{name}_init",
+                    "fn": self._wrap(init_dist, event_dim - 1),
+                    "value": None,
+                    "is_observed": False,
+                }
+            )
+            init_dist = msg["fn"]
+            init_dist = init_dist.to_event(1 - init_dist.event_dim)
 
         # Reparameterize the transition distribution as conditionally Gaussian.
         trans_dist = fn.transition_dist
         if self.trans is not None:
             if trans_dist.batch_shape[-1] != fn.duration:
-                trans_dist = trans_dist.expand(trans_dist.batch_shape[:-1] + (fn.duration,))
-            trans_dist, _ = self.trans("{}_trans".format(name), trans_dist.to_event(1), None)
-            trans_dist = trans_dist.to_event(-1)
+                trans_dist = trans_dist.expand(
+                    trans_dist.batch_shape[:-1] + (fn.duration,)
+                )
+            msg = self.trans.apply(
+                {
+                    "name": f"{name}_trans",
+                    "fn": self._wrap(trans_dist, event_dim),
+                    "value": None,
+                    "is_observed": False,
+                }
+            )
+            trans_dist = msg["fn"]
+            trans_dist = trans_dist.to_event(1 - trans_dist.event_dim)
 
         # Reparameterize the observation distribution as conditionally Gaussian.
         obs_dist = fn.observation_dist
         if self.obs is not None:
             if obs_dist.batch_shape[-1] != fn.duration:
                 obs_dist = obs_dist.expand(obs_dist.batch_shape[:-1] + (fn.duration,))
-            obs_dist, obs = self.obs("{}_obs".format(name), obs_dist.to_event(1), obs)
-            obs_dist = obs_dist.to_event(-1)
+            msg = self.obs.apply(
+                {
+                    "name": f"{name}_obs",
+                    "fn": self._wrap(obs_dist, event_dim),
+                    "value": value,
+                    "is_observed": is_observed,
+                }
+            )
+            obs_dist = msg["fn"]
+            obs_dist = obs_dist.to_event(1 - obs_dist.event_dim)
+            value = msg["value"]
+            is_observed = msg["is_observed"]
 
         # Reparameterize the entire HMM as conditionally Gaussian.
-        hmm = dist.GaussianHMM(init_dist, fn.transition_matrix, trans_dist,
-                               fn.observation_matrix, obs_dist, duration=fn.duration)
+        hmm = dist.GaussianHMM(
+            init_dist,
+            fn.transition_matrix,
+            trans_dist,
+            fn.observation_matrix,
+            obs_dist,
+            duration=fn.duration,
+        )
+        hmm = self._wrap(hmm, event_dim)
 
         # Apply any observation transforms.
         if fn.transforms:
             hmm = dist.TransformedDistribution(hmm, fn.transforms)
 
-        return hmm, obs
+        return {"fn": hmm, "value": value, "is_observed": is_observed}

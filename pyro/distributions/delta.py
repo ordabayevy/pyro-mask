@@ -4,10 +4,11 @@
 import numbers
 
 import torch
-from torch.distributions import constraints
 
 from pyro.distributions.torch_distribution import TorchDistribution
 from pyro.distributions.util import sum_rightmost
+
+from . import constraints
 
 
 class Delta(TorchDistribution):
@@ -24,24 +25,37 @@ class Delta(TorchDistribution):
         under differentiable transformation.
     :param int event_dim: Optional event dimension, defaults to zero.
     """
+
     has_rsample = True
-    arg_constraints = {'v': constraints.real, 'log_density': constraints.real}
-    support = constraints.real
+    arg_constraints = {"v": constraints.dependent, "log_density": constraints.real}
 
     def __init__(self, v, log_density=0.0, event_dim=0, validate_args=None):
         if event_dim > v.dim():
-            raise ValueError('Expected event_dim <= v.dim(), actual {} vs {}'.format(event_dim, v.dim()))
+            raise ValueError(
+                "Expected event_dim <= v.dim(), actual {} vs {}".format(
+                    event_dim, v.dim()
+                )
+            )
         batch_dim = v.dim() - event_dim
         batch_shape = v.shape[:batch_dim]
         event_shape = v.shape[batch_dim:]
         if isinstance(log_density, numbers.Number):
-            log_density = torch.full(batch_shape, log_density, dtype=v.dtype, device=v.device)
+            log_density = torch.full(
+                batch_shape, log_density, dtype=v.dtype, device=v.device
+            )
         elif validate_args and log_density.shape != batch_shape:
-            raise ValueError('Expected log_density.shape = {}, actual {}'.format(
-                log_density.shape, batch_shape))
+            raise ValueError(
+                "Expected log_density.shape = {}, actual {}".format(
+                    log_density.shape, batch_shape
+                )
+            )
         self.v = v
         self.log_density = log_density
         super().__init__(batch_shape, event_shape, validate_args=validate_args)
+
+    @constraints.dependent_property
+    def support(self):
+        return constraints.independent(constraints.real, self.event_dim)
 
     def expand(self, batch_shape, _instance=None):
         new = self._get_checked_instance(Delta, _instance)

@@ -7,18 +7,23 @@ from collections import namedtuple
 import torch
 
 from pyro.util import ignore_jit_warnings
+
 from .messenger import Messenger
 from .runtime import _DIM_ALLOCATOR
 
 
-class CondIndepStackFrame(namedtuple("CondIndepStackFrame", ["name", "dim", "size", "counter"])):
+class CondIndepStackFrame(
+    namedtuple("CondIndepStackFrame", ["name", "dim", "size", "counter"])
+):
     @property
     def vectorized(self):
         return self.dim is not None
 
     def _key(self):
         with ignore_jit_warnings(["Converting a tensor to a Python number"]):
-            size = self.size.item() if isinstance(self.size, torch.Tensor) else self.size
+            size = (
+                self.size.item() if isinstance(self.size, torch.Tensor) else self.size
+            )
             return self.name, self.dim, size, self.counter
 
     def __eq__(self, other):
@@ -53,6 +58,7 @@ class IndepMessenger(Messenger):
             xy_noise = sample("xy_noise", dist.Normal(loc, scale).expand_by([200, 320]))
 
     """
+
     def __init__(self, name=None, size=None, dim=None, device=None):
         if not torch._C._get_tracing_state() and size == 0:
             raise ZeroDivisionError("size cannot be zero")
@@ -93,7 +99,8 @@ class IndepMessenger(Messenger):
         if self._vectorized is True or self.dim is not None:
             raise ValueError(
                 "cannot use plate {} as both vectorized and non-vectorized"
-                "independence context".format(self.name))
+                "independence context".format(self.name)
+            )
 
         self._vectorized = False
         self.dim = None

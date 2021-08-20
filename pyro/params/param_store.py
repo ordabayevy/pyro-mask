@@ -4,6 +4,7 @@
 import re
 import warnings
 import weakref
+from contextlib import contextmanager
 
 import torch
 from torch.distributions import constraints, transform_to
@@ -30,6 +31,9 @@ class ParamStoreDict:
       two different modules each of which contains a parameter named `weight`. by contrast, a user
       can only have one top-level parameter named `weight` (outside of any module).
     - parameters can be saved and loaded from disk using `save` and `load`.
+    - in general parameters are associated with both *constrained* and *unconstrained* values. for
+      example, under the hood a parameter that is constrained to be positive is represented as an
+      unconstrained tensor in log space.
     """
 
     # -------------------------------------------------------------------------------
@@ -53,7 +57,8 @@ class ParamStoreDict:
 
     def items(self):
         """
-        Iterate over ``(name, constrained_param)`` pairs.
+        Iterate over ``(name, constrained_param)`` pairs. Note that `constrained_param` is
+        in the constrained (i.e. user-facing) space.
         """
         for name in self._params:
             yield name, self[name]
@@ -96,7 +101,7 @@ class ParamStoreDict:
 
     def __getitem__(self, name):
         """
-        Get the constrained value of a named parameter.
+        Get the *constrained* value of a named parameter.
         """
         unconstrained_value = self._params[name]
 
@@ -110,7 +115,7 @@ class ParamStoreDict:
     def __setitem__(self, name, new_constrained_value):
         """
         Set the constrained value of an existing parameter, or the value of a
-        new unconstrained parameter. To declare a new parameter with
+        new *unconstrained* parameter. To declare a new parameter with
         constraint, use :meth:`setdefault`.
         """
         # store constraint, defaulting to unconstrained
@@ -129,7 +134,7 @@ class ParamStoreDict:
 
     def setdefault(self, name, init_constrained_value, constraint=constraints.real):
         """
-        Retrieve a constrained parameter value from the if it exists, otherwise
+        Retrieve a *constrained* parameter value from the if it exists, otherwise
         set the initial value. Note that this is a little fancier than
         :meth:`dict.setdefault`.
 
@@ -144,7 +149,7 @@ class ParamStoreDict:
         :param init_constrained_value: initial constrained value
         :type init_constrained_value: torch.Tensor or callable returning a torch.Tensor
         :param constraint: torch constraint object
-        :type constraint: torch.distributions.constraints.Constraint
+        :type constraint: ~torch.distributions.constraints.Constraint
         :returns: constrained parameter value
         :rtype: torch.Tensor
         """
@@ -168,22 +173,29 @@ class ParamStoreDict:
     def named_parameters(self):
         """
         Returns an iterator over ``(name, unconstrained_value)`` tuples for
-        each parameter in the ParamStore.
+        each parameter in the ParamStore. Note that, in the event the parameter is constrained,
+        `unconstrained_value` is in the unconstrained space implicitly used by the constraint.
         """
         return self._params.items()
 
     def get_all_param_names(self):
-        warnings.warn("ParamStore.get_all_param_names() is deprecated; use .keys() instead.",
-                      DeprecationWarning)
+        warnings.warn(
+            "ParamStore.get_all_param_names() is deprecated; use .keys() instead.",
+            DeprecationWarning,
+        )
         return self.keys()
 
     def replace_param(self, param_name, new_param, old_param):
-        warnings.warn("ParamStore.replace_param() is deprecated; use .__setitem__() instead.",
-                      DeprecationWarning)
+        warnings.warn(
+            "ParamStore.replace_param() is deprecated; use .__setitem__() instead.",
+            DeprecationWarning,
+        )
         assert self._params[param_name] is old_param.unconstrained()
         self[param_name] = new_param
 
-    def get_param(self, name, init_tensor=None, constraint=constraints.real, event_dim=None):
+    def get_param(
+        self, name, init_tensor=None, constraint=constraints.real, event_dim=None
+    ):
         """
         Get parameter from its name. If it does not yet exist in the
         ParamStore, it will be created and stored.
@@ -224,29 +236,33 @@ class ParamStoreDict:
         """
         return self._param_to_name.get(p)
 
-    def get_state(self):
+    # -------------------------------------------------------------------------------
+    # Persistence interface
+
+    def get_state(self) -> dict:
         """
         Get the ParamStore state.
         """
         state = {
-            'params': self._params,
-            'constraints': self._constraints,
+            "params": self._params.copy(),
+            "constraints": self._constraints.copy(),
         }
         return state
 
-    def set_state(self, state):
+    def set_state(self, state: dict):
         """
-        Set the ParamStore state using state from a previous get_state() call
+        Set the ParamStore state using state from a previous :meth:`get_state` call
         """
         assert isinstance(state, dict), "malformed ParamStore state"
-        assert set(state.keys()) == set(['params', 'constraints']), \
-            "malformed ParamStore keys {}".format(state.keys())
+        assert set(state.keys()) == set(
+            ["params", "constraints"]
+        ), "malformed ParamStore keys {}".format(state.keys())
 
-        for param_name, param in state['params'].items():
+        for param_name, param in state["params"].items():
             self._params[param_name] = param
             self._param_to_name[param] = param_name
 
-        for param_name, constraint in state['constraints'].items():
+        for param_name, constraint in state["constraints"].items():
             if isinstance(constraint, type(constraints.real)):
                 # Work around lack of hash & equality comparison on constraints.
                 constraint = constraints.real
@@ -254,7 +270,7 @@ class ParamStoreDict:
 
     def save(self, filename):
         """
-        Save parameters to disk
+        Save parameters to file
 
         :param filename: file name to save to
         :type filename: str
@@ -264,7 +280,7 @@ class ParamStoreDict:
 
     def load(self, filename, map_location=None):
         """
-        Loads parameters from disk
+        Loads parameters from file
 
         .. note::
 
@@ -283,6 +299,44 @@ class ParamStoreDict:
             state = torch.load(input_file, map_location)
         self.set_state(state)
 
+    @contextmanager
+    def scope(self, state=None) -> dict:
+        """
+        Context manager for using multiple parameter stores within the same process.
+
+        This is a thin wrapper around :meth:`get_state`, :meth:`clear`, and
+        :meth:`set_state`. For large models where memory space is limiting, you
+        may want to instead manually use :meth:`save`, :meth:`clear`, and
+        :meth:`load`.
+
+        Example usage::
+
+            param_store = pyro.get_param_store()
+
+            # Train multiple models, while avoiding param name conflicts.
+            with param_store.scope() as scope1:
+                # ...Train one model,guide pair...
+            with param_store.scope() as scope2:
+                # ...Train another model,guide pair...
+
+            # Now evaluate each, still avoiding name conflicts.
+            with param_store.scope(scope1):  # loads the first model's scope
+               # ...evaluate the first model...
+            with param_store.scope(scope2):  # loads the second model's scope
+               # ...evaluate the second model...
+        """
+        if state is None:
+            state = {"params": {}, "constraints": {}}
+        old_state = self.get_state()
+        try:
+            self.clear()
+            self.set_state(state)
+            yield state
+            state.update(self.get_state())
+        finally:
+            self.clear()
+            self.set_state(old_state)
+
 
 # used to create fully-formed param names, e.g. mymodule$$$mysubmodule.weight
 _MODULE_NAMESPACE_DIVIDER = "$$$"
@@ -300,3 +354,7 @@ def user_param_name(param_name):
     if _MODULE_NAMESPACE_DIVIDER in param_name:
         return param_name.split(_MODULE_NAMESPACE_DIVIDER)[1]
     return param_name
+
+
+def normalize_param_name(name):
+    return name.replace(_MODULE_NAMESPACE_DIVIDER, ".")

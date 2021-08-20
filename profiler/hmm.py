@@ -8,12 +8,11 @@ import re
 import subprocess
 import sys
 from collections import defaultdict
-from os.path import join, abspath
+from os.path import abspath, join
 
 from numpy import median
 
 from pyro.util import timed
-
 
 EXAMPLES_DIR = join(abspath(__file__), os.pardir, os.pardir, "examples")
 
@@ -23,8 +22,11 @@ def main(args):
     configs = []
     for model in args.model.split(","):
         for seed in args.seed.split(","):
-            config = ["--seed={}".format(seed), "--model={}".format(model),
-                      "--num-steps={}".format(args.num_steps)]
+            config = [
+                "--seed={}".format(seed),
+                "--model={}".format(model),
+                "--num-steps={}".format(args.num_steps),
+            ]
             if args.cuda:
                 config.append("--cuda")
             if args.jit:
@@ -42,8 +44,10 @@ def main(args):
             pass
     for config in configs:
         with timed() as t:
-            out = subprocess.check_output((sys.executable, "-O", abspath(join(EXAMPLES_DIR, "hmm.py"))) + config,
-                                          encoding="utf-8")
+            out = subprocess.check_output(
+                (sys.executable, "-O", abspath(join(EXAMPLES_DIR, "hmm.py"))) + config,
+                encoding="utf-8",
+            )
         results[config] = t.elapsed
         if "--jit" in config:
             matched = re.search(r"time to compile: (\d+\.\d+)", out)
@@ -62,8 +66,11 @@ def main(args):
     print("| Min (sec) | Mean (sec) | Max (sec) | python -O examples/hmm.py ... |")
     print("| -: | -: | -: | - |")
     for config, times in sorted(grouped.items()):
-        print("| {:0.1f} | {:0.1f} | {:0.1f} | {} |".format(
-            min(times), median(times), max(times), " ".join(config)))
+        print(
+            "| {:0.1f} | {:0.1f} | {:0.1f} | {} |".format(
+                min(times), median(times), max(times), " ".join(config)
+            )
+        )
 
 
 if __name__ == "__main__":

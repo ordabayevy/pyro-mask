@@ -10,14 +10,22 @@ import pyro
 import pyro.distributions as dist
 from pyro import poutine
 from pyro.distributions.torch_distribution import MaskedDistribution
-from pyro.infer.reparam import LatentStableReparam, StableReparam, SymmetricStableReparam
+from pyro.infer import Trace_ELBO
+from pyro.infer.autoguide import AutoNormal
+from pyro.infer.reparam import (
+    LatentStableReparam,
+    StableReparam,
+    SymmetricStableReparam,
+)
 from tests.common import assert_close
+
+from .util import check_init_reparam
 
 
 # Test helper to extract a few absolute moments from univariate samples.
 # This uses abs moments because Stable variance is infinite.
 def get_moments(x):
-    points = torch.tensor([-4., -1., 0., 1., 4.])
+    points = torch.tensor([-4.0, -1.0, 0.0, 1.0, 4.0])
     points = points.reshape((-1,) + (1,) * x.dim())
     return torch.cat([x.mean(0, keepdim=True), (x - points).abs().mean(1)])
 
@@ -25,10 +33,13 @@ def get_moments(x):
 @pytest.mark.parametrize("shape", [(), (4,), (2, 3)], ids=str)
 @pytest.mark.parametrize("Reparam", [LatentStableReparam, StableReparam])
 def test_stable(Reparam, shape):
-    stability = torch.empty(shape).uniform_(1.5, 2.).requires_grad_()
+    stability = torch.empty(shape).uniform_(1.5, 2.0).requires_grad_()
     skew = torch.empty(shape).uniform_(-0.5, 0.5).requires_grad_()
+    # test edge case when skew is 0
+    if skew.dim() > 0 and skew.shape[-1] > 0:
+        skew.data[..., 0] = 0.0
     scale = torch.empty(shape).uniform_(0.5, 1.0).requires_grad_()
-    loc = torch.empty(shape).uniform_(-1., 1.).requires_grad_()
+    loc = torch.empty(shape).uniform_(-1.0, 1.0).requires_grad_()
     params = [stability, skew, scale, loc]
 
     def model():
@@ -55,7 +66,8 @@ def test_stable(Reparam, shape):
         expected_grads = grad(expected_m.sum(), params, retain_graph=True)
         actual_grads = grad(actual_m.sum(), params, retain_graph=True)
         assert_close(actual_grads[0], expected_grads[0], atol=0.2)
-        assert_close(actual_grads[1], expected_grads[1], atol=0.1)
+        assert_close(actual_grads[1][skew != 0], expected_grads[1][skew != 0], atol=0.1)
+        assert_close(actual_grads[1][skew == 0], expected_grads[1][skew == 0], atol=0.3)
         assert_close(actual_grads[2], expected_grads[2], atol=0.1)
         assert_close(actual_grads[3], expected_grads[3], atol=0.1)
 
@@ -64,7 +76,7 @@ def test_stable(Reparam, shape):
 def test_symmetric_stable(shape):
     stability = torch.empty(shape).uniform_(1.6, 1.9).requires_grad_()
     scale = torch.empty(shape).uniform_(0.5, 1.0).requires_grad_()
-    loc = torch.empty(shape).uniform_(-1., 1.).requires_grad_()
+    loc = torch.empty(shape).uniform_(-1.0, 1.0).requires_grad_()
     params = [stability, scale, loc]
 
     def model():
@@ -93,7 +105,9 @@ def test_symmetric_stable(shape):
 
 @pytest.mark.parametrize("skew", [-1.0, -0.5, 0.0, 0.5, 1.0])
 @pytest.mark.parametrize("stability", [0.1, 0.4, 0.8, 0.99, 1.0, 1.01, 1.3, 1.7, 2.0])
-@pytest.mark.parametrize("Reparam", [LatentStableReparam, SymmetricStableReparam, StableReparam])
+@pytest.mark.parametrize(
+    "Reparam", [LatentStableReparam, SymmetricStableReparam, StableReparam]
+)
 def test_distribution(stability, skew, Reparam):
     if Reparam is SymmetricStableReparam and (skew != 0 or stability == 2):
         pytest.skip()
@@ -108,3 +122,38 @@ def test_distribution(stability, skew, Reparam):
     with poutine.reparam(config={"x": Reparam()}):
         actual = model()
     assert ks_2samp(expected, actual).pvalue > 0.05
+
+
+@pytest.mark.parametrize("subsample", [False, True], ids=["full", "subsample"])
+@pytest.mark.parametrize(
+    "Reparam", [LatentStableReparam, SymmetricStableReparam, StableReparam]
+)
+def test_subsample_smoke(Reparam, subsample):
+    def model():
+        with poutine.reparam(config={"x": Reparam()}):
+            with pyro.plate("plate", 10):
+                return pyro.sample("x", dist.Stable(1.5, 0))
+
+    def create_plates():
+        return pyro.plate("plate", 10, subsample_size=3)
+
+    guide = AutoNormal(model, create_plates=create_plates if subsample else None)
+    Trace_ELBO().loss(model, guide)  # smoke test
+
+
+@pytest.mark.parametrize("skew", [-1.0, -0.5, 0.0, 0.5, 1.0])
+@pytest.mark.parametrize("stability", [0.1, 0.4, 0.8, 0.99, 1.0, 1.01, 1.3, 1.7, 2.0])
+@pytest.mark.parametrize(
+    "Reparam",
+    [LatentStableReparam, SymmetricStableReparam, StableReparam],
+)
+def test_init(stability, skew, Reparam):
+    if Reparam is SymmetricStableReparam and (skew != 0 or stability == 2):
+        pytest.skip()
+    if stability == 2 and skew in (-1, 1):
+        pytest.skip()
+
+    def model():
+        return pyro.sample("x", dist.Stable(stability, skew))
+
+    check_init_reparam(model, Reparam())

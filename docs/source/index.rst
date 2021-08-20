@@ -13,9 +13,8 @@ Pyro Documentation
    :maxdepth: 2
    :caption: Pyro Core:
 
-   installation
    getting_started
-   primitives 
+   primitives
    inference
    distributions
    parameters
@@ -23,6 +22,7 @@ Pyro Documentation
    optimization
    poutine
    ops
+   testing
 
 .. toctree::
    :glob:
@@ -33,10 +33,15 @@ Pyro Documentation
    contrib.bnn
    contrib.cevae
    contrib.easyguide
+   contrib.epidemiology
    contrib.examples
+   contrib.forecast
+   contrib.funsor
    contrib.gp
    contrib.minipyro
+   contrib.mue
    contrib.oed
+   contrib.randomvariable
    contrib.timeseries
    contrib.tracking
 
@@ -48,4 +53,3 @@ Indices and tables
 * :ref:`search`
 
 .. * :ref:`modindex`
-

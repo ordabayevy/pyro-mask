@@ -4,16 +4,14 @@
 import logging
 
 import pyro
-import pyro.poutine as poutine
 import pyro.distributions as dist
+import pyro.poutine as poutine
 import pyro.poutine.runtime
-
 
 logger = logging.getLogger(__name__)
 
 
 def test_nested_reset():
-
     def nested_model():
         pyro.sample("internal0", dist.Bernoulli(0.5))
         with poutine.escape(escape_fn=lambda msg: msg["name"] == "internal2"):

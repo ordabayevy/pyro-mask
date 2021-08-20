@@ -36,19 +36,32 @@ class LatentStableReparam(Reparam):
         Stable Distributions: Models for Heavy Tailed Data.
         http://fs2.american.edu/jpnolan/www/stable/chap1.pdf
     """
-    def __call__(self, name, fn, obs):
+
+    def apply(self, msg):
+        name = msg["name"]
+        fn = msg["fn"]
+        # ignore msg["value"]
+        is_observed = msg["is_observed"]
+
         fn, event_dim = self._unwrap(fn)
         assert isinstance(fn, dist.Stable) and fn.coords == "S0"
-        assert obs is None, "LatentStableReparam does not support observe statements"
+        if is_observed:
+            raise NotImplementedError(
+                f"At pyro.sample({repr(name)},...), "
+                "LatentStableReparam does not support observe statements"
+            )
 
         # Draw parameter-free noise.
         proto = fn.stability
-        half_pi = proto.new_full(proto.shape, math.pi / 2)
+        half_pi = proto.new_tensor(math.pi / 2)
         one = proto.new_ones(proto.shape)
-        u = pyro.sample("{}_uniform".format(name),
-                        self._wrap(dist.Uniform(-half_pi, half_pi), event_dim))
-        e = pyro.sample("{}_exponential".format(name),
-                        self._wrap(dist.Exponential(one), event_dim))
+        u = pyro.sample(
+            "{}_uniform".format(name),
+            self._wrap(dist.Uniform(-half_pi, half_pi).expand(proto.shape), event_dim),
+        )
+        e = pyro.sample(
+            "{}_exponential".format(name), self._wrap(dist.Exponential(one), event_dim)
+        )
 
         # Differentiably transform.
         x = _standard_stable(fn.stability, fn.skew, u, e, coords="S0")
@@ -56,7 +69,7 @@ class LatentStableReparam(Reparam):
 
         # Simulate a pyro.deterministic() site.
         new_fn = dist.Delta(value, event_dim=event_dim).mask(False)
-        return new_fn, value
+        return {"fn": new_fn, "value": value, "is_observed": True}
 
 
 class SymmetricStableReparam(Reparam):
@@ -80,7 +93,13 @@ class SymmetricStableReparam(Reparam):
         "Option Pricing with Levy-Stable Processes"
         https://pdfs.semanticscholar.org/4d66/c91b136b2a38117dd16c2693679f5341c616.pdf
     """
-    def __call__(self, name, fn, obs):
+
+    def apply(self, msg):
+        name = msg["name"]
+        fn = msg["fn"]
+        value = msg["value"]
+        is_observed = msg["is_observed"]
+
         fn, event_dim = self._unwrap(fn)
         assert isinstance(fn, dist.Stable) and fn.coords == "S0"
         if is_validation_enabled():
@@ -91,12 +110,15 @@ class SymmetricStableReparam(Reparam):
 
         # Draw parameter-free noise.
         proto = fn.stability
-        half_pi = proto.new_full(proto.shape, math.pi / 2)
+        half_pi = proto.new_tensor(math.pi / 2)
         one = proto.new_ones(proto.shape)
-        u = pyro.sample("{}_uniform".format(name),
-                        self._wrap(dist.Uniform(-half_pi, half_pi), event_dim))
-        e = pyro.sample("{}_exponential".format(name),
-                        self._wrap(dist.Exponential(one), event_dim))
+        u = pyro.sample(
+            "{}_uniform".format(name),
+            self._wrap(dist.Uniform(-half_pi, half_pi).expand(proto.shape), event_dim),
+        )
+        e = pyro.sample(
+            "{}_exponential".format(name), self._wrap(dist.Exponential(one), event_dim)
+        )
 
         # Differentiably transform to scale drawn from a totally-skewed stable variable.
         a = fn.stability
@@ -107,7 +129,7 @@ class SymmetricStableReparam(Reparam):
 
         # Construct a scaled Gaussian, using Stable(2,0,s,m) == Normal(m,s*sqrt(2)).
         new_fn = self._wrap(dist.Normal(fn.loc, scale * (2 ** 0.5)), event_dim)
-        return new_fn, obs
+        return {"fn": new_fn, "value": value, "is_observed": is_observed}
 
 
 class StableReparam(Reparam):
@@ -129,7 +151,12 @@ class StableReparam(Reparam):
         "One-dimensional stable distributions"
     """
 
-    def __call__(self, name, fn, obs):
+    def apply(self, msg):
+        name = msg["name"]
+        fn = msg["fn"]
+        value = msg["value"]
+        is_observed = msg["is_observed"]
+
         fn, event_dim = self._unwrap(fn)
         assert isinstance(fn, dist.Stable) and fn.coords == "S0"
 
@@ -162,47 +189,56 @@ class StableReparam(Reparam):
 
         # Draw parameter-free noise.
         proto = fn.stability
-        half_pi = proto.new_full(proto.shape, math.pi / 2)
+        half_pi = proto.new_tensor(math.pi / 2)
         one = proto.new_ones(proto.shape)
-        zu = pyro.sample("{}_z_uniform".format(name),
-                         self._wrap(dist.Uniform(-half_pi, half_pi), event_dim))
-        ze = pyro.sample("{}_z_exponential".format(name),
-                         self._wrap(dist.Exponential(one), event_dim))
-        tu = pyro.sample("{}_t_uniform".format(name),
-                         self._wrap(dist.Uniform(-half_pi, half_pi), event_dim))
-        te = pyro.sample("{}_t_exponential".format(name),
-                         self._wrap(dist.Exponential(one), event_dim))
+        zu = pyro.sample(
+            "{}_z_uniform".format(name),
+            self._wrap(dist.Uniform(-half_pi, half_pi).expand(proto.shape), event_dim),
+        )
+        ze = pyro.sample(
+            "{}_z_exponential".format(name),
+            self._wrap(dist.Exponential(one), event_dim),
+        )
+        tu = pyro.sample(
+            "{}_t_uniform".format(name),
+            self._wrap(dist.Uniform(-half_pi, half_pi).expand(proto.shape), event_dim),
+        )
+        te = pyro.sample(
+            "{}_t_exponential".format(name),
+            self._wrap(dist.Exponential(one), event_dim),
+        )
 
         # Differentiably transform.
         a = fn.stability
         z = _unsafe_standard_stable(a / 2, 1, zu, ze, coords="S")
         t = _standard_stable(a, one, tu, te, coords="S0")
         a_inv = a.reciprocal()
-        skew_abs = fn.skew.abs()
+        eps = torch.finfo(a.dtype).eps
+        skew_abs = fn.skew.abs().clamp(min=eps, max=1 - eps)
         t_scale = skew_abs.pow(a_inv)
         s_scale = (1 - skew_abs).pow(a_inv)
-        shift = _safe_shift(a, skew_abs, t_scale)
-        loc = fn.loc + fn.scale * fn.skew.sign() * (t * t_scale + shift)
+        shift = _safe_shift(a, fn.skew, t_scale, skew_abs)
+        loc = fn.loc + fn.scale * (fn.skew.sign() * t_scale * t + shift)
         scale = fn.scale * s_scale * z.sqrt() * (math.pi / 4 * a).cos().pow(a_inv)
         scale = scale.clamp(min=torch.finfo(scale.dtype).tiny)
 
         # Construct a scaled Gaussian, using Stable(2,0,s,m) == Normal(m,s*sqrt(2)).
         new_fn = self._wrap(dist.Normal(loc, scale * (2 ** 0.5)), event_dim)
-        return new_fn, obs
+        return {"fn": new_fn, "value": value, "is_observed": is_observed}
 
 
-def _unsafe_shift(a, skew_abs, t_scale):
+def _unsafe_shift(a, skew, t_scale):
     # At a=1 the lhs has a root and the rhs has an asymptote.
-    return (t_scale - skew_abs) * (math.pi / 2 * a).tan()
+    return (skew.sign() * t_scale - skew) * (math.pi / 2 * a).tan()
 
 
-def _safe_shift(a, skew_abs, t_scale):
+def _safe_shift(a, skew, t_scale, skew_abs):
     radius = 0.005
     hole = 1.0
     with torch.no_grad():
         near_hole = (a - hole).abs() <= radius
     if not near_hole.any():
-        return _unsafe_shift(a, skew_abs, t_scale)
+        return _unsafe_shift(a, skew, t_scale)
 
     # Avoid the hole at a=1 by interpolating between points on either side.
     a_ = a.unsqueeze(-1).expand(a.shape + (2,)).contiguous()
@@ -214,7 +250,8 @@ def _safe_shift(a, skew_abs, t_scale):
         # a_ is reparametrized, even though we've clamped some values.
         weights = (a_ - a.unsqueeze(-1)).abs_().mul_(-1 / (2 * radius)).add_(1)
         weights[~near_hole] = 0.5
+    skew_ = skew.unsqueeze(-1)
     skew_abs_ = skew_abs.unsqueeze(-1)
     t_scale_ = skew_abs_.pow(a_.reciprocal())
-    pairs = _unsafe_shift(a_, skew_abs_, t_scale_)
+    pairs = _unsafe_shift(a_, skew_, t_scale_)
     return (pairs * weights).sum(-1)

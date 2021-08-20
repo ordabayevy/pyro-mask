@@ -32,6 +32,15 @@ Loc-Scale Decentering
     :special-members: __call__
     :show-inheritance:
 
+Gumbel-Softmax
+--------------
+.. automodule:: pyro.infer.reparam.softmax
+    :members:
+    :undoc-members:
+    :member-order: bysource
+    :special-members: __call__
+    :show-inheritance:
+
 Transformed Distributions
 -------------------------
 .. automodule:: pyro.infer.reparam.transform
@@ -44,6 +53,24 @@ Transformed Distributions
 Discrete Cosine Transform
 -------------------------
 .. automodule:: pyro.infer.reparam.discrete_cosine
+    :members:
+    :undoc-members:
+    :member-order: bysource
+    :special-members: __call__
+    :show-inheritance:
+
+Haar Transform
+--------------
+.. automodule:: pyro.infer.reparam.haar
+    :members:
+    :undoc-members:
+    :member-order: bysource
+    :special-members: __call__
+    :show-inheritance:
+
+Unit Jacobian Transforms
+------------------------
+.. automodule:: pyro.infer.reparam.unit_jacobian
     :members:
     :undoc-members:
     :member-order: bysource
@@ -68,6 +95,15 @@ Stable Distributions
     :special-members: __call__
     :show-inheritance:
 
+Projected Normal Distributions
+------------------------------
+.. automodule:: pyro.infer.reparam.projected_normal
+    :members:
+    :undoc-members:
+    :member-order: bysource
+    :special-members: __call__
+    :show-inheritance:
+
 Hidden Markov Models
 --------------------
 .. automodule:: pyro.infer.reparam.hmm
@@ -77,9 +113,27 @@ Hidden Markov Models
     :special-members: __call__
     :show-inheritance:
 
+Site Splitting
+--------------
+.. automodule:: pyro.infer.reparam.split
+    :members:
+    :undoc-members:
+    :member-order: bysource
+    :special-members: __call__
+    :show-inheritance:
+
 Neural Transport
 ----------------
 .. automodule:: pyro.infer.reparam.neutra
+    :members:
+    :undoc-members:
+    :member-order: bysource
+    :special-members: __call__
+    :show-inheritance:
+
+Structured Preconditioning
+--------------------------
+.. automodule:: pyro.infer.reparam.structured
     :members:
     :undoc-members:
     :member-order: bysource

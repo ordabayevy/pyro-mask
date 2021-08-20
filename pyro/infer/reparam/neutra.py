@@ -1,6 +1,8 @@
 # Copyright (c) 2017-2019 Uber Technologies, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
+from contextlib import ExitStack
+
 from torch.distributions import biject_to
 
 import pyro
@@ -8,6 +10,8 @@ import pyro.distributions as dist
 from pyro import poutine
 from pyro.distributions.util import sum_rightmost
 from pyro.infer.autoguide.guides import AutoContinuous
+from pyro.poutine.plate_messenger import block_plate
+
 from .reparam import Reparam
 
 
@@ -40,13 +44,18 @@ class NeuTraReparam(Reparam):
 
     :param ~pyro.infer.autoguide.AutoContinuous guide: A trained guide.
     """
+
     def __init__(self, guide):
         if not isinstance(guide, AutoContinuous):
-            raise TypeError("NeuTraReparam expected an AutoContinuous guide, but got {}"
-                            .format(type(guide)))
+            raise TypeError(
+                "NeuTraReparam expected an AutoContinuous guide, but got {}".format(
+                    type(guide)
+                )
+            )
         self.guide = guide
         self.transform = None
-        self.x_unconstrained = []
+        self.x_unconstrained = {}
+        self.is_observed = None
 
     def _reparam_config(self, site):
         if site["name"] in self.guide.prototype_trace:
@@ -55,38 +64,62 @@ class NeuTraReparam(Reparam):
     def reparam(self, fn=None):
         return poutine.reparam(fn, config=self._reparam_config)
 
-    def __call__(self, name, fn, obs):
+    def apply(self, msg):
+        name = msg["name"]
+        fn = msg["fn"]
+        value = msg["value"]
+        is_observed = msg["is_observed"]
         if name not in self.guide.prototype_trace.nodes:
-            return fn, obs
-        assert obs is None, "NeuTraReparam does not support observe statements"
-        log_density = 0.
-        if not self.x_unconstrained:  # On first sample site.
+            return {"fn": fn, "value": value, "is_observed": is_observed}
+        if is_observed:
+            raise NotImplementedError(
+                f"At pyro.sample({repr(name)},...), "
+                "NeuTraReparam does not support observe statements."
+            )
+
+        log_density = 0.0
+        compute_density = poutine.get_mask() is not False
+        if name not in self.x_unconstrained:  # On first sample site.
             # Sample a shared latent.
-            # TODO(fehiepsi) Consider adding a method to extract transform from an Auto*Normal(posterior).
-            posterior = self.guide.get_posterior()
-            if not isinstance(posterior, dist.TransformedDistribution):
-                raise ValueError("NeuTraReparam only supports guides whose posteriors are "
-                                 "TransformedDistributions but got a posterior of type {}"
-                                 .format(type(posterior)))
-            self.transform = dist.transforms.ComposeTransform(posterior.transforms)
-            z_unconstrained = pyro.sample("{}_shared_latent".format(name),
-                                          posterior.base_dist.mask(False))
+            try:
+                self.transform = self.guide.get_transform()
+            except (NotImplementedError, TypeError) as e:
+                raise ValueError(
+                    "NeuTraReparam only supports guides that implement "
+                    "`get_transform` method that does not depend on the "
+                    "model's `*args, **kwargs`"
+                ) from e
+
+            with ExitStack() as stack:
+                for plate in self.guide.plates.values():
+                    stack.enter_context(block_plate(dim=plate.dim, strict=False))
+                z_unconstrained = pyro.sample(
+                    f"{name}_shared_latent", self.guide.get_base_dist().mask(False)
+                )
 
             # Differentiably transform.
             x_unconstrained = self.transform(z_unconstrained)
-            log_density = self.transform.log_abs_det_jacobian(z_unconstrained, x_unconstrained)
-            self.x_unconstrained = list(reversed(list(self.guide._unpack_latent(x_unconstrained))))
+            if compute_density:
+                log_density = self.transform.log_abs_det_jacobian(
+                    z_unconstrained, x_unconstrained
+                )
+            self.x_unconstrained = {
+                site["name"]: (site, unconstrained_value)
+                for site, unconstrained_value in self.guide._unpack_latent(
+                    x_unconstrained
+                )
+            }
 
         # Extract a single site's value from the shared latent.
-        site, unconstrained_value = self.x_unconstrained.pop()
-        assert name == site["name"], "model structure changed"
+        site, unconstrained_value = self.x_unconstrained.pop(name)
         transform = biject_to(fn.support)
         value = transform(unconstrained_value)
-        logdet = transform.log_abs_det_jacobian(unconstrained_value, value)
-        logdet = sum_rightmost(logdet, logdet.dim() - value.dim() + fn.event_dim)
-        log_density = log_density + fn.log_prob(value) + logdet
+        if compute_density:
+            logdet = transform.log_abs_det_jacobian(unconstrained_value, value)
+            logdet = sum_rightmost(logdet, logdet.dim() - value.dim() + fn.event_dim)
+            log_density = log_density + fn.log_prob(value) + logdet
         new_fn = dist.Delta(value, log_density, event_dim=fn.event_dim)
-        return new_fn, value
+        return {"fn": new_fn, "value": value, "is_observed": True}
 
     def transform_sample(self, latent):
         """

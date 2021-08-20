@@ -22,8 +22,14 @@ class GenericLGSSM(TimeSeriesModel):
     :param bool learnable_observation_loc: whether the mean of the observation model should be learned or not;
         defaults to False.
     """
-    def __init__(self, obs_dim=1, state_dim=2, obs_noise_scale_init=None,
-                 learnable_observation_loc=False):
+
+    def __init__(
+        self,
+        obs_dim=1,
+        state_dim=2,
+        obs_noise_scale_init=None,
+        learnable_observation_loc=False,
+    ):
         self.obs_dim = obs_dim
         self.state_dim = state_dim
 
@@ -33,19 +39,24 @@ class GenericLGSSM(TimeSeriesModel):
 
         super().__init__()
 
-        self.obs_noise_scale = PyroParam(obs_noise_scale_init,
-                                         constraint=constraints.positive)
-        self.trans_noise_scale_sq = PyroParam(torch.ones(state_dim),
-                                              constraint=constraints.positive)
-        self.trans_matrix = nn.Parameter(torch.eye(state_dim) + 0.03 * torch.randn(state_dim, state_dim))
+        self.obs_noise_scale = PyroParam(
+            obs_noise_scale_init, constraint=constraints.positive
+        )
+        self.trans_noise_scale_sq = PyroParam(
+            torch.ones(state_dim), constraint=constraints.positive
+        )
+        self.trans_matrix = nn.Parameter(
+            torch.eye(state_dim) + 0.03 * torch.randn(state_dim, state_dim)
+        )
         self.obs_matrix = nn.Parameter(0.3 * torch.randn(state_dim, obs_dim))
-        self.init_noise_scale_sq = PyroParam(torch.ones(state_dim),
-                                             constraint=constraints.positive)
+        self.init_noise_scale_sq = PyroParam(
+            torch.ones(state_dim), constraint=constraints.positive
+        )
 
         if learnable_observation_loc:
             self.obs_loc = nn.Parameter(torch.zeros(obs_dim))
         else:
-            self.register_buffer('obs_loc', torch.zeros(obs_dim))
+            self.register_buffer("obs_loc", torch.zeros(obs_dim))
 
     def _get_init_dist(self):
         loc = self.obs_matrix.new_zeros(self.state_dim)
@@ -58,12 +69,22 @@ class GenericLGSSM(TimeSeriesModel):
         loc = self.obs_matrix.new_zeros(self.state_dim)
         return MultivariateNormal(loc, self.trans_noise_scale_sq.diag_embed())
 
-    def _get_dist(self):
+    def get_dist(self, duration=None):
         """
         Get the :class:`~pyro.distributions.GaussianHMM` distribution that corresponds to :class:`GenericLGSSM`.
+
+        :param int duration: Optional size of the time axis ``event_shape[0]``.
+            This is required when sampling from homogeneous HMMs whose parameters
+            are not expanded along the time axis.
         """
-        return dist.GaussianHMM(self._get_init_dist(), self.trans_matrix, self._get_trans_dist(),
-                                self.obs_matrix, self._get_obs_dist())
+        return dist.GaussianHMM(
+            self._get_init_dist(),
+            self.trans_matrix,
+            self._get_trans_dist(),
+            self.obs_matrix,
+            self._get_obs_dist(),
+            duration=duration,
+        )
 
     @pyro_method
     def log_prob(self, targets):
@@ -74,7 +95,7 @@ class GenericLGSSM(TimeSeriesModel):
         :returns torch.Tensor: A (scalar) log probability.
         """
         assert targets.dim() == 2 and targets.size(-1) == self.obs_dim
-        return self._get_dist().log_prob(targets)
+        return self.get_dist().log_prob(targets)
 
     @torch.no_grad()
     def _filter(self, targets):
@@ -82,7 +103,7 @@ class GenericLGSSM(TimeSeriesModel):
         Return the filtering state for the associated state space model.
         """
         assert targets.dim() == 2 and targets.size(-1) == self.obs_dim
-        return self._get_dist().filter(targets)
+        return self.get_dist().filter(targets)
 
     @torch.no_grad()
     def _forecast(self, N_timesteps, filtering_state, include_observation_noise=True):
@@ -94,21 +115,26 @@ class GenericLGSSM(TimeSeriesModel):
         predicted_mean = torch.matmul(filtering_state.loc, N_trans_obs)
 
         # first compute the contribution from filtering_state.covariance_matrix
-        predicted_covar1 = torch.matmul(N_trans_obs.transpose(-1, -2),
-                                        torch.matmul(filtering_state.covariance_matrix,
-                                        N_trans_obs))  # N O O
+        predicted_covar1 = torch.matmul(
+            N_trans_obs.transpose(-1, -2),
+            torch.matmul(filtering_state.covariance_matrix, N_trans_obs),
+        )  # N O O
 
         # next compute the contribution from process noise that is injected at each timestep.
         # (we need to do a cumulative sum to integrate across time)
         process_covar = self._get_trans_dist().covariance_matrix
         N_trans_obs_shift = torch.cat([self.obs_matrix.unsqueeze(0), N_trans_obs[:-1]])
-        predicted_covar2 = torch.matmul(N_trans_obs_shift.transpose(-1, -2),
-                                        torch.matmul(process_covar, N_trans_obs_shift))  # N O O
+        predicted_covar2 = torch.matmul(
+            N_trans_obs_shift.transpose(-1, -2),
+            torch.matmul(process_covar, N_trans_obs_shift),
+        )  # N O O
 
         predicted_covar = predicted_covar1 + torch.cumsum(predicted_covar2, dim=0)
 
         if include_observation_noise:
-            predicted_covar = predicted_covar + self.obs_noise_scale.pow(2.0).diag_embed()
+            predicted_covar = (
+                predicted_covar + self.obs_noise_scale.pow(2.0).diag_embed()
+            )
 
         return predicted_mean, predicted_covar
 

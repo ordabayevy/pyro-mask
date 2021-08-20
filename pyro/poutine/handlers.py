@@ -49,6 +49,7 @@ in just a few lines of code::
     monte_carlo_elbo = model_tr.log_prob_sum() - guide_tr.log_prob_sum()
 """
 
+import collections
 import functools
 import re
 
@@ -56,6 +57,7 @@ from pyro.poutine import util
 
 from .block_messenger import BlockMessenger
 from .broadcast_messenger import BroadcastMessenger
+from .collapse_messenger import CollapseMessenger
 from .condition_messenger import ConditionMessenger
 from .do_messenger import DoMessenger
 from .enum_messenger import EnumMessenger
@@ -80,6 +82,7 @@ from .uncondition_messenger import UnconditionMessenger
 _msngrs = [
     BlockMessenger,
     BroadcastMessenger,
+    CollapseMessenger,
     ConditionMessenger,
     DoMessenger,
     EnumMessenger,
@@ -98,27 +101,45 @@ _msngrs = [
 
 
 def _make_handler(msngr_cls):
+    _re1 = re.compile("(.)([A-Z][a-z]+)")
+    _re2 = re.compile("([a-z0-9])([A-Z])")
 
     def handler(fn=None, *args, **kwargs):
-        if fn is not None and not callable(fn):
+        if fn is not None and not (
+            callable(fn) or isinstance(fn, collections.abc.Iterable)
+        ):
             raise ValueError(
-                "{} is not callable, did you mean to pass it as a keyword arg?".format(fn))
+                "{} is not callable, did you mean to pass it as a keyword arg?".format(
+                    fn
+                )
+            )
         msngr = msngr_cls(*args, **kwargs)
-        return msngr(fn) if fn is not None else msngr
+        return (
+            functools.update_wrapper(msngr(fn), fn, updated=())
+            if fn is not None
+            else msngr
+        )
 
-    return handler
+    # handler names from messenger names: strip Messenger suffix, convert CamelCase to snake_case
+    handler_name = _re2.sub(
+        r"\1_\2", _re1.sub(r"\1_\2", msngr_cls.__name__.split("Messenger")[0])
+    ).lower()
+    handler.__doc__ = (
+        """Convenient wrapper of :class:`~pyro.poutine.{}.{}` \n\n""".format(
+            handler_name + "_messenger", msngr_cls.__name__
+        )
+        + (msngr_cls.__doc__ if msngr_cls.__doc__ else "")
+    )
+    handler.__name__ = handler_name
+    return handler_name, handler
 
 
-_re1 = re.compile('(.)([A-Z][a-z]+)')
-_re2 = re.compile('([a-z0-9])([A-Z])')
+trace = None  # flake8
+escape = None  # flake8
+
 for _msngr_cls in _msngrs:
-    _handler_name = _re2.sub(
-        r'\1_\2', _re1.sub(r'\1_\2', _msngr_cls.__name__.split("Messenger")[0])).lower()
-    _handler = _make_handler(_msngr_cls)
+    _handler_name, _handler = _make_handler(_msngr_cls)
     _handler.__module__ = __name__
-    _handler.__doc__ = """Convenient wrapper of :class:`~pyro.poutine.{}.{}` \n\n""".format(
-        _handler_name + "_messenger", _msngr_cls.__name__) + _msngr_cls.__doc__
-    _handler.__name__ = _handler_name
     locals()[_handler_name] = _handler
 
 
@@ -126,8 +147,15 @@ for _msngr_cls in _msngrs:
 # Begin composite operations
 #########################################
 
-def queue(fn=None, queue=None, max_tries=None,
-          extend_fn=None, escape_fn=None, num_samples=None):
+
+def queue(
+    fn=None,
+    queue=None,
+    max_tries=None,
+    extend_fn=None,
+    escape_fn=None,
+    num_samples=None,
+):
     """
     Used in sequential enumeration over discrete variables.
 
@@ -161,22 +189,28 @@ def queue(fn=None, queue=None, max_tries=None,
         def _fn(*args, **kwargs):
 
             for i in range(max_tries):
-                assert not queue.empty(), \
-                    "trying to get() from an empty queue will deadlock"
+                assert (
+                    not queue.empty()
+                ), "trying to get() from an empty queue will deadlock"
 
                 next_trace = queue.get()
                 try:
-                    ftr = trace(escape(replay(wrapped, trace=next_trace),  # noqa: F821
-                                       escape_fn=functools.partial(escape_fn,
-                                                                   next_trace)))
+                    ftr = trace(
+                        escape(
+                            replay(wrapped, trace=next_trace),  # noqa: F821
+                            escape_fn=functools.partial(escape_fn, next_trace),
+                        )
+                    )
                     return ftr(*args, **kwargs)
                 except NonlocalExit as site_container:
                     site_container.reset_stack()
-                    for tr in extend_fn(ftr.trace.copy(), site_container.site,
-                                        num_samples=num_samples):
+                    for tr in extend_fn(
+                        ftr.trace.copy(), site_container.site, num_samples=num_samples
+                    ):
                         queue.put(tr)
 
             raise ValueError("max tries ({}) exceeded".format(str(max_tries)))
+
         return _fn
 
     return wrapper(fn) if fn is not None else wrapper
@@ -187,9 +221,10 @@ def markov(fn=None, history=1, keep=False, dim=None, name=None):
     Markov dependency declaration.
 
     This can be used in a variety of ways:
-    - as a context manager
-    - as a decorator for recursive functions
-    - as an iterator for markov chains
+
+        - as a context manager
+        - as a decorator for recursive functions
+        - as an iterator for markov chains
 
     :param int history: The number of previous contexts visible from the
         current context. Defaults to 1. If zero, this is similar to
@@ -209,6 +244,8 @@ def markov(fn=None, history=1, keep=False, dim=None, name=None):
         return MarkovMessenger(history=history, keep=keep, dim=dim, name=name)
     if not callable(fn):
         # Used as a generator
-        return MarkovMessenger(history=history, keep=keep, dim=dim, name=name).generator(iterable=fn)
+        return MarkovMessenger(
+            history=history, keep=keep, dim=dim, name=name
+        ).generator(iterable=fn)
     # Used as a decorator with bound args
     return MarkovMessenger(history=history, keep=keep, dim=dim, name=name)(fn)

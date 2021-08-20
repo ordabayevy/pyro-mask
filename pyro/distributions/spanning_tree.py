@@ -49,7 +49,8 @@ class SpanningTree(TorchDistribution):
         ``initial_edges`` defaulting to a cheap approximate sample;
         ``backend`` one of "python" or "cpp", defaulting to "python".
     """
-    arg_constraints = {'edge_logits': constraints.real}
+
+    arg_constraints = {"edge_logits": constraints.real}
     support = constraints.nonnegative_integer
     has_enumerate_support = True
 
@@ -57,7 +58,7 @@ class SpanningTree(TorchDistribution):
         if edge_logits.is_cuda:
             raise NotImplementedError("SpanningTree does not support cuda tensors")
         K = len(edge_logits)
-        V = int(round(0.5 + (0.25 + 2 * K)**0.5))
+        V = int(round(0.5 + (0.25 + 2 * K) ** 0.5))
         assert K == V * (V - 1) // 2
         E = V - 1
         event_shape = (E, 2)
@@ -66,8 +67,11 @@ class SpanningTree(TorchDistribution):
         super().__init__(batch_shape, event_shape, validate_args=validate_args)
         if self._validate_args:
             if edge_logits.shape != (K,):
-                raise ValueError("Expected edge_logits of shape ({},), but got shape {}"
-                                 .format(K, edge_logits.shape))
+                raise ValueError(
+                    "Expected edge_logits of shape ({},), but got shape {}".format(
+                        K, edge_logits.shape
+                    )
+                )
         self.num_vertices = V
         self.sampler_options = {} if sampler_options is None else sampler_options
 
@@ -88,10 +92,16 @@ class SpanningTree(TorchDistribution):
             raise ValueError("Invalid vertex ids:\n{}".format(edges))
         if not (edges[..., 0] < edges[..., 1]).all():
             raise ValueError("Vertices are not sorted in each edge:\n{}".format(edges))
-        if not ((edges[..., :-1, 1] < edges[..., 1:, 1]) |
-                ((edges[..., :-1, 1] == edges[..., 1:, 1]) &
-                 (edges[..., :-1, 0] < edges[..., 1:, 0]))).all():
-            raise ValueError("Edges are not sorted colexicographically:\n{}".format(edges))
+        if not (
+            (edges[..., :-1, 1] < edges[..., 1:, 1])
+            | (
+                (edges[..., :-1, 1] == edges[..., 1:, 1])
+                & (edges[..., :-1, 0] < edges[..., 1:, 0])
+            )
+        ).all():
+            raise ValueError(
+                "Edges are not sorted colexicographically:\n{}".format(edges)
+            )
 
         # Verify tree property, i.e. connectivity.
         V = self.num_vertices
@@ -112,16 +122,22 @@ class SpanningTree(TorchDistribution):
         # use a Cholesky decomposition to compute the log determinant.
         # See https://en.wikipedia.org/wiki/Kirchhoff%27s_theorem
         V = self.num_vertices
-        grid = make_complete_graph(V)
-        shift = self.edge_logits.max()
-        edge_probs = (self.edge_logits - shift).exp()
-        adjacency = torch.zeros(V, V, dtype=edge_probs.dtype)
-        adjacency[grid[0], grid[1]] = edge_probs
-        adjacency[grid[1], grid[0]] = edge_probs
-        laplacian = adjacency.sum(-1).diag() - adjacency
+        v1, v2 = make_complete_graph(V).unbind(0)
+        logits = self.edge_logits.new_full((V, V), -math.inf)
+        logits[v1, v2] = self.edge_logits
+        logits[v2, v1] = self.edge_logits
+        log_diag = logits.logsumexp(-1)
+        # Numerically stabilize so that laplacian has 1's on the diagonal.
+        shift = 0.5 * log_diag
+        laplacian = torch.eye(V) - (logits - shift - shift[:, None]).exp()
         truncated = laplacian[:-1, :-1]
-        log_det = torch.cholesky(truncated).diag().log().sum() * 2
-        return log_det + shift * (V - 1)
+        try:
+            import gpytorch
+
+            log_det = gpytorch.lazy.NonLazyTensor(truncated).logdet()
+        except ImportError:
+            log_det = torch.linalg.cholesky(truncated).diag().log().sum() * 2
+        return log_det + log_diag[:-1].sum()
 
     def log_prob(self, edges):
         if self._validate_args:
@@ -165,6 +181,39 @@ class SpanningTree(TorchDistribution):
         trees = enumerate_spanning_trees(self.num_vertices)
         return torch.tensor(trees, dtype=torch.long)
 
+    @property
+    def mode(self):
+        """
+        :returns: The maximum weight spanning tree.
+        :rtype: Tensor
+        """
+        backend = self.sampler_options.get("backend", "python")
+        return find_best_tree(self.edge_logits, backend=backend)
+
+    @property
+    def edge_mean(self):
+        """
+        Computes marginal probabilities of each edge being active.
+
+        .. note:: This is similar to other distributions' ``.mean()``
+            method, but with a different shape because this distribution's
+            values are not encoded as binary matrices.
+
+        :returns: A symmetric square ``(V,V)``-shaped matrix with values
+            in ``[0,1]`` denoting the marginal probability of each edge
+            being in a sampled value.
+        :rtype: Tensor
+        """
+        V = self.num_vertices
+        v1, v2 = make_complete_graph(V).unbind(0)
+        logits = self.edge_logits - self.edge_logits.max()
+        w = self.edge_logits.new_zeros(V, V)
+        w[v1, v2] = w[v2, v1] = logits.exp()
+        laplacian = w.sum(-1).diag_embed() - w
+        inv = (laplacian + 1 / V).pinverse()
+        resistance = inv.diag() + inv.diag()[..., None] - 2 * inv
+        return resistance * w
+
 
 ################################################################################
 # Sampler implementation.
@@ -180,12 +229,15 @@ def _get_cpp_module():
     global _cpp_module
     if _cpp_module is None:
         import os
+
         from torch.utils.cpp_extension import load
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spanning_tree.cpp")
-        _cpp_module = load(name="cpp_spanning_tree",
-                           sources=[path],
-                           extra_cflags=['-O2'],
-                           verbose=True)
+
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "spanning_tree.cpp"
+        )
+        _cpp_module = load(
+            name="cpp_spanning_tree", sources=[path], extra_cflags=["-O2"], verbose=True
+        )
     return _cpp_module
 
 
@@ -208,7 +260,7 @@ def make_complete_graph(num_vertices, backend="python"):
 
 def _make_complete_graph(num_vertices):
     if num_vertices < 2:
-        raise ValueError('PyTorch cannot handle zero-sized multidimensional tensors')
+        raise ValueError("PyTorch cannot handle zero-sized multidimensional tensors")
     V = num_vertices
     K = V * (V - 1) // 2
     v1 = torch.arange(V)
@@ -216,7 +268,7 @@ def _make_complete_graph(num_vertices):
     v1, v2 = torch.broadcast_tensors(v1, v2)
     v1 = v1.contiguous().view(-1)
     v2 = v2.contiguous().view(-1)
-    mask = (v1 < v2)
+    mask = v1 < v2
     grid = torch.stack((v1[mask], v2[mask]))
     assert grid.shape == (2, K)
     return grid
@@ -362,7 +414,7 @@ def sample_tree_mcmc(edge_logits, edges, backend="python"):
 @torch.no_grad()
 def _sample_tree_approx(edge_logits):
     K = len(edge_logits)
-    V = int(round(0.5 + (0.25 + 2 * K)**0.5))
+    V = int(round(0.5 + (0.25 + 2 * K) ** 0.5))
     assert K == V * (V - 1) // 2
     E = V - 1
     grid = make_complete_graph(V)
@@ -382,10 +434,10 @@ def _sample_tree_approx(edge_logits):
     # Sample edges connecting the cumulative tree to a new leaf.
     for e in range(1, E):
         c1, c2 = components[grid]
-        mask = (c1 != c2)
+        mask = c1 != c2
         valid_logits = edge_logits[mask]
         probs = (valid_logits - valid_logits.max()).exp()
-        k = mask.nonzero()[torch.multinomial(probs, 1)[0]]
+        k = mask.nonzero(as_tuple=False)[torch.multinomial(probs, 1)[0]]
         components[grid[:, k]] = 1
         edge_ids[e] = k
 
@@ -427,15 +479,87 @@ def sample_tree(edge_logits, init_edges=None, mcmc_steps=1, backend="python"):
     return edges
 
 
+@torch.no_grad()
+def _find_best_tree(edge_logits):
+    K = len(edge_logits)
+    V = int(round(0.5 + (0.25 + 2 * K) ** 0.5))
+    assert K == V * (V - 1) // 2
+    E = V - 1
+    grid = make_complete_graph(V)
+
+    # Each of E edges in the tree is stored as an id k in [0, K) indexing into
+    # the complete graph. The id of an edge (v1,v2) is k = v1+v2*(v2-1)/2.
+    edge_ids = torch.empty((E,), dtype=torch.long)
+    # This maps each vertex to whether it is a member of the cumulative tree.
+    components = torch.zeros(V, dtype=torch.bool)
+
+    # Find the first edge.
+    k = edge_logits.argmax(0).item()
+    components[grid[:, k]] = 1
+    edge_ids[0] = k
+
+    # Find edges connecting the cumulative tree to a new leaf.
+    for e in range(1, E):
+        c1, c2 = components[grid]
+        mask = c1 != c2
+        valid_logits = edge_logits[mask]
+        k = valid_logits.argmax(0).item()
+        k = mask.nonzero(as_tuple=False)[k]
+        components[grid[:, k]] = 1
+        edge_ids[e] = k
+
+    # Convert edge ids to a canonical list of pairs.
+    edge_ids = edge_ids.sort()[0]
+    edges = torch.empty((E, 2), dtype=torch.long)
+    edges[:, 0] = grid[0, edge_ids]
+    edges[:, 1] = grid[1, edge_ids]
+    return edges
+
+
+def find_best_tree(edge_logits, backend="python"):
+    """
+    Find the maximum weight spanning tree of a dense weighted graph.
+
+    :param torch.Tensor edge_logits: A length-K array of nonnormalized log
+        probabilities.
+    :returns: An E x 2 tensor of edges in the form of (vertex,vertex) pairs.
+        Each edge should be sorted and the entire tensor should be
+        lexicographically sorted.
+    :rtype: torch.Tensor
+    """
+    if backend == "python":
+        return _find_best_tree(edge_logits)
+    elif backend == "cpp":
+        return _get_cpp_module().find_best_tree(edge_logits)
+    else:
+        raise ValueError("unknown backend: {}".format(repr(backend)))
+
+
 ################################################################################
 # Enumeration implementation.
 ################################################################################
 
 # See https://oeis.org/A000272
 NUM_SPANNING_TREES = [
-    1, 1, 1, 3, 16, 125, 1296, 16807, 262144, 4782969, 100000000, 2357947691,
-    61917364224, 1792160394037, 56693912375296, 1946195068359375,
-    72057594037927936, 2862423051509815793, 121439531096594251776,
+    1,
+    1,
+    1,
+    3,
+    16,
+    125,
+    1296,
+    16807,
+    262144,
+    4782969,
+    100000000,
+    2357947691,
+    61917364224,
+    1792160394037,
+    56693912375296,
+    1946195068359375,
+    72057594037927936,
+    2862423051509815793,
+    121439531096594251776,
     5480386857784802185939,
 ]
 
@@ -476,8 +600,9 @@ def _close_under_permutations(V, tree_generators):
     vertices = list(range(V))
     trees = []
     for tree in tree_generators:
-        trees.extend(set(_permute_tree(perm, tree)
-                         for perm in itertools.permutations(vertices)))
+        trees.extend(
+            set(_permute_tree(perm, tree) for perm in itertools.permutations(vertices))
+        )
     trees.sort()
     return trees
 
@@ -488,8 +613,10 @@ def enumerate_spanning_trees(V):
     """
     if V >= len(_TREE_GENERATORS):
         raise NotImplementedError(
-            "enumerate_spanning_trees() is implemented only for trees with up to {} vertices"
-            .format(len(_TREE_GENERATORS) - 1))
+            "enumerate_spanning_trees() is implemented only for trees with up to {} vertices".format(
+                len(_TREE_GENERATORS) - 1
+            )
+        )
     all_trees = _close_under_permutations(V, _TREE_GENERATORS[V])
     assert len(all_trees) == NUM_SPANNING_TREES[V]
     return all_trees

@@ -3,13 +3,12 @@
 
 from collections import namedtuple
 
-import torch
-
 import pyro
 import pyro.distributions as dist
 from pyro.distributions.util import scalar_like
+from pyro.infer.autoguide import init_to_uniform
 from pyro.infer.mcmc.hmc import HMC
-from pyro.ops.integrator import velocity_verlet
+from pyro.ops.integrator import potential_grad, velocity_verlet
 from pyro.util import optional, torch_isnan
 
 
@@ -29,11 +28,28 @@ def _logaddexp(x, y):
 # weight is the number of valid points in case we use slice sampling
 #   and is the log sum of (unnormalized) probabilites of valid points
 #   when we use multinomial sampling
-_TreeInfo = namedtuple("TreeInfo", ["z_left", "r_left", "z_left_grads",
-                                    "z_right", "r_right", "z_right_grads",
-                                    "z_proposal", "z_proposal_pe", "z_proposal_grads",
-                                    "r_sum", "weight", "turning", "diverging",
-                                    "sum_accept_probs", "num_proposals"])
+_TreeInfo = namedtuple(
+    "TreeInfo",
+    [
+        "z_left",
+        "r_left",
+        "r_left_unscaled",
+        "z_left_grads",
+        "z_right",
+        "r_right",
+        "r_right_unscaled",
+        "z_right_grads",
+        "z_proposal",
+        "z_proposal_pe",
+        "z_proposal_grads",
+        "r_sum",
+        "weight",
+        "turning",
+        "diverging",
+        "sum_accept_probs",
+        "num_proposals",
+    ],
+)
 
 
 class NUTS(HMC):
@@ -95,6 +111,8 @@ class NUTS(HMC):
         so the sampling will be slower but more robust. Default to 0.8.
     :param int max_tree_depth: Max depth of the binary tree created during the doubling
         scheme of NUTS sampler. Default to 10.
+    :param callable init_strategy: A per-site initialization function.
+        See :ref:`autoguide-initialization` section for available functions.
 
     Example:
 
@@ -116,33 +134,39 @@ class NUTS(HMC):
         tensor([ 0.9221,  1.9464,  2.9228])
     """
 
-    def __init__(self,
-                 model=None,
-                 potential_fn=None,
-                 step_size=1,
-                 adapt_step_size=True,
-                 adapt_mass_matrix=True,
-                 full_mass=False,
-                 use_multinomial_sampling=True,
-                 transforms=None,
-                 max_plate_nesting=None,
-                 jit_compile=False,
-                 jit_options=None,
-                 ignore_jit_warnings=False,
-                 target_accept_prob=0.8,
-                 max_tree_depth=10):
-        super().__init__(model,
-                         potential_fn,
-                         step_size,
-                         adapt_step_size=adapt_step_size,
-                         adapt_mass_matrix=adapt_mass_matrix,
-                         full_mass=full_mass,
-                         transforms=transforms,
-                         max_plate_nesting=max_plate_nesting,
-                         jit_compile=jit_compile,
-                         jit_options=jit_options,
-                         ignore_jit_warnings=ignore_jit_warnings,
-                         target_accept_prob=target_accept_prob)
+    def __init__(
+        self,
+        model=None,
+        potential_fn=None,
+        step_size=1,
+        adapt_step_size=True,
+        adapt_mass_matrix=True,
+        full_mass=False,
+        use_multinomial_sampling=True,
+        transforms=None,
+        max_plate_nesting=None,
+        jit_compile=False,
+        jit_options=None,
+        ignore_jit_warnings=False,
+        target_accept_prob=0.8,
+        max_tree_depth=10,
+        init_strategy=init_to_uniform,
+    ):
+        super().__init__(
+            model,
+            potential_fn,
+            step_size,
+            adapt_step_size=adapt_step_size,
+            adapt_mass_matrix=adapt_mass_matrix,
+            full_mass=full_mass,
+            transforms=transforms,
+            max_plate_nesting=max_plate_nesting,
+            jit_compile=jit_compile,
+            jit_options=jit_options,
+            ignore_jit_warnings=ignore_jit_warnings,
+            target_accept_prob=target_accept_prob,
+            init_strategy=init_strategy,
+        )
         self.use_multinomial_sampling = use_multinomial_sampling
         self._max_tree_depth = max_tree_depth
         # There are three conditions to stop doubling process:
@@ -157,31 +181,39 @@ class NUTS(HMC):
         # Here, as suggested in [1], we set dE_max = 1000.
         self._max_sliced_energy = 1000
 
-    def _is_turning(self, r_left, r_right, r_sum):
+    def _is_turning(self, r_left_unscaled, r_right_unscaled, r_sum):
         # We follow the strategy in Section A.4.2 of [2] for this implementation.
-        r_left_flat = torch.cat([r_left[site_name].reshape(-1) for site_name in sorted(r_left)])
-        r_right_flat = torch.cat([r_right[site_name].reshape(-1) for site_name in sorted(r_right)])
-        r_sum = r_sum - (r_left_flat + r_right_flat) / 2
-        if self.inverse_mass_matrix.dim() == 2:
-            if (self.inverse_mass_matrix.matmul(r_left_flat).dot(r_sum) > 0 and
-                    self.inverse_mass_matrix.matmul(r_right_flat).dot(r_sum) > 0):
-                return False
-        else:
-            if (self.inverse_mass_matrix.mul(r_left_flat).dot(r_sum) > 0 and
-                    self.inverse_mass_matrix.mul(r_right_flat).dot(r_sum) > 0):
-                return False
-        return True
+        left_angle = 0.0
+        right_angle = 0.0
+        for site_names, value in r_sum.items():
+            rho = (
+                value - (r_left_unscaled[site_names] + r_right_unscaled[site_names]) / 2
+            )
+            left_angle += r_left_unscaled[site_names].dot(rho)
+            right_angle += r_right_unscaled[site_names].dot(rho)
+
+        return (left_angle <= 0) or (right_angle <= 0)
 
     def _build_basetree(self, z, r, z_grads, log_slice, direction, energy_current):
         step_size = self.step_size if direction == 1 else -self.step_size
         z_new, r_new, z_grads, potential_energy = velocity_verlet(
-            z, r, self.potential_fn, self.inverse_mass_matrix, step_size, z_grads=z_grads)
-        r_new_flat = torch.cat([r_new[site_name].reshape(-1) for site_name in sorted(r_new)])
-        energy_new = potential_energy + self._kinetic_energy(r_new)
+            z,
+            r,
+            self.potential_fn,
+            self.mass_matrix_adapter.kinetic_grad,
+            step_size,
+            z_grads=z_grads,
+        )
+        r_new_unscaled = self.mass_matrix_adapter.unscale(r_new)
+        energy_new = potential_energy + self._kinetic_energy(r_new_unscaled)
         # handle the NaN case
-        energy_new = scalar_like(energy_new, float("inf")) if torch_isnan(energy_new) else energy_new
+        energy_new = (
+            scalar_like(energy_new, float("inf"))
+            if torch_isnan(energy_new)
+            else energy_new
+        )
         sliced_energy = energy_new + log_slice
-        diverging = (sliced_energy > self._max_sliced_energy)
+        diverging = sliced_energy > self._max_sliced_energy
         delta_energy = energy_new - energy_current
         accept_prob = (-delta_energy).exp().clamp(max=1.0)
 
@@ -192,18 +224,41 @@ class NUTS(HMC):
             #   we eliminate states which p(z, r) < u, or dE > 0.
             # Due to this elimination (and stop doubling conditions),
             #   the weight of binary tree might not equal to 2^tree_depth.
-            tree_weight = scalar_like(sliced_energy, 1. if sliced_energy <= 0 else 0.)
+            tree_weight = scalar_like(sliced_energy, 1.0 if sliced_energy <= 0 else 0.0)
 
-        return _TreeInfo(z_new, r_new, z_grads, z_new, r_new, z_grads, z_new, potential_energy,
-                         z_grads, r_new_flat, tree_weight, False, diverging, accept_prob, 1)
+        r_sum = r_new_unscaled
+        return _TreeInfo(
+            z_new,
+            r_new,
+            r_new_unscaled,
+            z_grads,
+            z_new,
+            r_new,
+            r_new_unscaled,
+            z_grads,
+            z_new,
+            potential_energy,
+            z_grads,
+            r_sum,
+            tree_weight,
+            False,
+            diverging,
+            accept_prob,
+            1,
+        )
 
-    def _build_tree(self, z, r, z_grads, log_slice, direction, tree_depth, energy_current):
+    def _build_tree(
+        self, z, r, z_grads, log_slice, direction, tree_depth, energy_current
+    ):
         if tree_depth == 0:
-            return self._build_basetree(z, r, z_grads, log_slice, direction, energy_current)
+            return self._build_basetree(
+                z, r, z_grads, log_slice, direction, energy_current
+            )
 
         # build the first half of tree
-        half_tree = self._build_tree(z, r, z_grads, log_slice,
-                                     direction, tree_depth-1, energy_current)
+        half_tree = self._build_tree(
+            z, r, z_grads, log_slice, direction, tree_depth - 1, energy_current
+        )
         z_proposal = half_tree.z_proposal
         z_proposal_pe = half_tree.z_proposal_pe
         z_proposal_grads = half_tree.z_proposal_grads
@@ -223,8 +278,9 @@ class NUTS(HMC):
             z = half_tree.z_left
             r = half_tree.r_left
             z_grads = half_tree.z_left_grads
-        other_half_tree = self._build_tree(z, r, z_grads, log_slice,
-                                           direction, tree_depth-1, energy_current)
+        other_half_tree = self._build_tree(
+            z, r, z_grads, log_slice, direction, tree_depth - 1, energy_current
+        )
 
         if self.use_multinomial_sampling:
             tree_weight = _logaddexp(half_tree.weight, other_half_tree.weight)
@@ -232,7 +288,10 @@ class NUTS(HMC):
             tree_weight = half_tree.weight + other_half_tree.weight
         sum_accept_probs = half_tree.sum_accept_probs + other_half_tree.sum_accept_probs
         num_proposals = half_tree.num_proposals + other_half_tree.num_proposals
-        r_sum = half_tree.r_sum + other_half_tree.r_sum
+        r_sum = {
+            site_names: half_tree.r_sum[site_names] + other_half_tree.r_sum[site_names]
+            for site_names in self.inverse_mass_matrix
+        }
 
         # The probability of that proposal belongs to which half of tree
         #     is computed based on the weights of each half.
@@ -242,10 +301,14 @@ class NUTS(HMC):
             # For the special case that the weights of each half are both 0,
             #   we choose the proposal from the first half
             #   (any is fine, because the probability of picking it at the end is 0!).
-            other_half_tree_prob = (other_half_tree.weight / tree_weight if tree_weight > 0
-                                    else scalar_like(tree_weight, 0.))
-        is_other_half_tree = pyro.sample("is_other_half_tree",
-                                         dist.Bernoulli(probs=other_half_tree_prob))
+            other_half_tree_prob = (
+                other_half_tree.weight / tree_weight
+                if tree_weight > 0
+                else scalar_like(tree_weight, 0.0)
+            )
+        is_other_half_tree = pyro.sample(
+            "is_other_half_tree", dist.Bernoulli(probs=other_half_tree_prob)
+        )
 
         if is_other_half_tree == 1:
             z_proposal = other_half_tree.z_proposal
@@ -256,45 +319,67 @@ class NUTS(HMC):
         if direction == 1:
             z_left = half_tree.z_left
             r_left = half_tree.r_left
+            r_left_unscaled = half_tree.r_left_unscaled
             z_left_grads = half_tree.z_left_grads
             z_right = other_half_tree.z_right
             r_right = other_half_tree.r_right
+            r_right_unscaled = other_half_tree.r_right_unscaled
             z_right_grads = other_half_tree.z_right_grads
         else:
             z_left = other_half_tree.z_left
             r_left = other_half_tree.r_left
+            r_left_unscaled = other_half_tree.r_left_unscaled
             z_left_grads = other_half_tree.z_left_grads
             z_right = half_tree.z_right
             r_right = half_tree.r_right
+            r_right_unscaled = half_tree.r_right_unscaled
             z_right_grads = half_tree.z_right_grads
 
         # We already check if first half tree is turning. Now, we check
         #     if the other half tree or full tree are turning.
-        turning = other_half_tree.turning or self._is_turning(r_left, r_right, r_sum)
+        turning = other_half_tree.turning or self._is_turning(
+            r_left_unscaled, r_right_unscaled, r_sum
+        )
 
         # The divergence is checked by the second half tree (the first half is already checked).
         diverging = other_half_tree.diverging
 
-        return _TreeInfo(z_left, r_left, z_left_grads, z_right, r_right, z_right_grads, z_proposal,
-                         z_proposal_pe, z_proposal_grads, r_sum, tree_weight, turning, diverging,
-                         sum_accept_probs, num_proposals)
+        return _TreeInfo(
+            z_left,
+            r_left,
+            r_left_unscaled,
+            z_left_grads,
+            z_right,
+            r_right,
+            r_right_unscaled,
+            z_right_grads,
+            z_proposal,
+            z_proposal_pe,
+            z_proposal_grads,
+            r_sum,
+            tree_weight,
+            turning,
+            diverging,
+            sum_accept_probs,
+            num_proposals,
+        )
 
     def sample(self, params):
         z, potential_energy, z_grads = self._fetch_from_cache()
         # recompute PE when cache is cleared
         if z is None:
             z = params
-            potential_energy = self.potential_fn(z)
-            self._cache(z, potential_energy)
+            z_grads, potential_energy = potential_grad(self.potential_fn, z)
+            self._cache(z, potential_energy, z_grads)
         # return early if no sample sites
         elif len(z) == 0:
             self._t += 1
-            self._mean_accept_prob = 1.
+            self._mean_accept_prob = 1.0
             if self._t > self._warmup_steps:
                 self._accept_cnt += 1
             return z
-        r, r_flat = self._sample_r(name="r_t={}".format(self._t))
-        energy_current = self._kinetic_energy(r) + potential_energy
+        r, r_unscaled = self._sample_r(name="r_t={}".format(self._t))
+        energy_current = self._kinetic_energy(r_unscaled) + potential_energy
 
         # Ideally, following a symplectic integrator trajectory, the energy is constant.
         # In that case, we can sample the proposal uniformly, and there is no need to use "slice".
@@ -317,18 +402,23 @@ class NUTS(HMC):
             # Rather than sampling the slice variable from `Uniform(0, exp(-energy))`, we can
             # sample log_slice directly using `energy`, so as to avoid potential underflow or
             # overflow issues ([2]).
-            slice_exp_term = pyro.sample("slicevar_exp_t={}".format(self._t),
-                                         dist.Exponential(scalar_like(energy_current, 1.)))
+            slice_exp_term = pyro.sample(
+                "slicevar_exp_t={}".format(self._t),
+                dist.Exponential(scalar_like(energy_current, 1.0)),
+            )
             log_slice = -energy_current - slice_exp_term
 
         z_left = z_right = z
         r_left = r_right = r
+        r_left_unscaled = r_right_unscaled = r_unscaled
         z_left_grads = z_right_grads = z_grads
         accepted = False
-        r_sum = r_flat
-        sum_accept_probs = 0.
+        r_sum = r_unscaled
+        sum_accept_probs = 0.0
         num_proposals = 0
-        tree_weight = scalar_like(energy_current, 0. if self.use_multinomial_sampling else 1.)
+        tree_weight = scalar_like(
+            energy_current, 0.0 if self.use_multinomial_sampling else 1.0
+        )
 
         # Temporarily disable distributions args checking as
         # NaNs are expected during step size adaptation.
@@ -336,21 +426,41 @@ class NUTS(HMC):
             # doubling process, stop when turning or diverging
             tree_depth = 0
             while tree_depth < self._max_tree_depth:
-                direction = pyro.sample("direction_t={}_treedepth={}".format(self._t, tree_depth),
-                                        dist.Bernoulli(probs=scalar_like(tree_weight, 0.5)))
+                direction = pyro.sample(
+                    "direction_t={}_treedepth={}".format(self._t, tree_depth),
+                    dist.Bernoulli(probs=scalar_like(tree_weight, 0.5)),
+                )
                 direction = int(direction.item())
-                if direction == 1:  # go to the right, start from the right leaf of current tree
-                    new_tree = self._build_tree(z_right, r_right, z_right_grads, log_slice,
-                                                direction, tree_depth, energy_current)
+                if (
+                    direction == 1
+                ):  # go to the right, start from the right leaf of current tree
+                    new_tree = self._build_tree(
+                        z_right,
+                        r_right,
+                        z_right_grads,
+                        log_slice,
+                        direction,
+                        tree_depth,
+                        energy_current,
+                    )
                     # update leaf for the next doubling process
                     z_right = new_tree.z_right
                     r_right = new_tree.r_right
+                    r_right_unscaled = new_tree.r_right_unscaled
                     z_right_grads = new_tree.z_right_grads
                 else:  # go the the left, start from the left leaf of current tree
-                    new_tree = self._build_tree(z_left, r_left, z_left_grads, log_slice,
-                                                direction, tree_depth, energy_current)
+                    new_tree = self._build_tree(
+                        z_left,
+                        r_left,
+                        z_left_grads,
+                        log_slice,
+                        direction,
+                        tree_depth,
+                        energy_current,
+                    )
                     z_left = new_tree.z_left
                     r_left = new_tree.r_left
+                    r_left_unscaled = new_tree.r_left_unscaled
                     z_left_grads = new_tree.z_left_grads
 
                 sum_accept_probs = sum_accept_probs + new_tree.sum_accept_probs
@@ -371,16 +481,25 @@ class NUTS(HMC):
                     new_tree_prob = (new_tree.weight - tree_weight).exp()
                 else:
                     new_tree_prob = new_tree.weight / tree_weight
-                rand = pyro.sample("rand_t={}_treedepth={}".format(self._t, tree_depth),
-                                   dist.Uniform(scalar_like(new_tree_prob, 0.),
-                                                scalar_like(new_tree_prob, 1.)))
+                rand = pyro.sample(
+                    "rand_t={}_treedepth={}".format(self._t, tree_depth),
+                    dist.Uniform(
+                        scalar_like(new_tree_prob, 0.0), scalar_like(new_tree_prob, 1.0)
+                    ),
+                )
                 if rand < new_tree_prob:
                     accepted = True
                     z = new_tree.z_proposal
-                    self._cache(z, new_tree.z_proposal_pe, new_tree.z_proposal_grads)
+                    z_grads = new_tree.z_proposal_grads
+                    self._cache(z, new_tree.z_proposal_pe, z_grads)
 
-                r_sum = r_sum + new_tree.r_sum
-                if self._is_turning(r_left, r_right, r_sum):  # stop doubling
+                r_sum = {
+                    site_names: r_sum[site_names] + new_tree.r_sum[site_names]
+                    for site_names in r_unscaled
+                }
+                if self._is_turning(
+                    r_left_unscaled, r_right_unscaled, r_sum
+                ):  # stop doubling
                     break
                 else:  # update tree_weight
                     if self.use_multinomial_sampling:
@@ -397,7 +516,7 @@ class NUTS(HMC):
                 self._accept_cnt += 1
         else:
             n = self._t
-            self._adapter.step(self._t, z, accept_prob)
+            self._adapter.step(self._t, z, accept_prob, z_grads)
         self._mean_accept_prob += (accept_prob.item() - self._mean_accept_prob) / n
 
         return z.copy()

@@ -18,8 +18,7 @@ class ScaleMessenger(Messenger):
 
         >>> def model(x):
         ...     s = pyro.param("s", torch.tensor(0.5))
-        ...     z = pyro.sample("z", dist.Normal(x, s), obs=1.0)
-        ...     return z ** 2
+        ...     pyro.sample("z", dist.Normal(x, s), obs=torch.tensor(1.0))
 
     ``scale`` multiplicatively scales the log-probabilities of sample sites:
 
@@ -33,11 +32,14 @@ class ScaleMessenger(Messenger):
     :param scale: a positive scaling factor
     :returns: stochastic function decorated with a :class:`~pyro.poutine.scale_messenger.ScaleMessenger`
     """
+
     def __init__(self, scale):
         if isinstance(scale, torch.Tensor):
             if is_validation_enabled() and not (scale > 0).all():
-                raise ValueError("Expected scale > 0 but got {}. ".format(scale) +
-                                 "Consider using poutine.mask() instead of poutine.scale().")
+                raise ValueError(
+                    "Expected scale > 0 but got {}. ".format(scale)
+                    + "Consider using poutine.mask() instead of poutine.scale()."
+                )
         elif not (scale > 0):
             raise ValueError("Expected scale > 0 but got {}".format(scale))
         super().__init__()

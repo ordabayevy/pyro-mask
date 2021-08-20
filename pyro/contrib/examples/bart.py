@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import bz2
 import csv
 import datetime
 import logging
@@ -13,7 +14,7 @@ import urllib
 
 import torch
 
-from pyro.contrib.examples.util import get_data_directory
+from pyro.contrib.examples.util import _mkdir_p, get_data_directory
 
 DATA = get_data_directory(__file__)
 
@@ -33,21 +34,12 @@ SOURCE_FILES = [
 CACHE_URL = "https://d2hg8soec8ck9v.cloudfront.net/datasets/bart_full.pkl.bz2"
 
 
-def _mkdir_p(dirname):
-    if not os.path.exists(dirname):
-        try:
-            os.makedirs(dirname)
-        except FileExistsError:
-            pass
-
-
 def _load_hourly_od(basename):
     filename = os.path.join(DATA, basename.replace(".csv.gz", ".pkl"))
     if os.path.exists(filename):
         return filename
 
     # Download source files.
-    _mkdir_p(DATA)
     gz_filename = os.path.join(DATA, basename)
     if not os.path.exists(gz_filename):
         url = SOURCE_DIR + basename
@@ -115,6 +107,7 @@ def load_bart_od():
         -   "counts": a ``torch.FloatTensor`` of ridership counts, with shape
             ``(num_hours, len(stations), len(stations))``.
     """
+    _mkdir_p(DATA)
     filename = os.path.join(DATA, "bart_full.pkl.bz2")
     # Work around apparent bug in torch.load(),torch.save().
     pkl_file = filename.rsplit(".", 1)[0]
@@ -122,22 +115,26 @@ def load_bart_od():
         try:
             urllib.request.urlretrieve(CACHE_URL, filename)
             logging.debug("cache hit, uncompressing")
-            subprocess.check_call(["bunzip2", "-k", filename])
+            with bz2.BZ2File(filename) as src, open(filename[:-4], "wb") as dst:
+                dst.write(src.read())
         except urllib.error.HTTPError:
             logging.debug("cache miss, preprocessing from scratch")
     if os.path.exists(pkl_file):
         return torch.load(pkl_file)
 
-    filenames = multiprocessing.Pool(len(SOURCE_FILES)).map(_load_hourly_od, SOURCE_FILES)
+    filenames = multiprocessing.Pool(len(SOURCE_FILES)).map(
+        _load_hourly_od, SOURCE_FILES
+    )
     datasets = list(map(torch.load, filenames))
 
     stations = sorted(set().union(*(d["stations"].keys() for d in datasets)))
     min_time = min(int(d["rows"][:, 0].min()) for d in datasets)
     max_time = max(int(d["rows"][:, 0].max()) for d in datasets)
     num_rows = max_time - min_time + 1
-    start_date = datasets[0]["start_date"] + datetime.timedelta(hours=min_time),
-    logging.info("Loaded data from {} stations, {} hours"
-                 .format(len(stations), num_rows))
+    start_date = (datasets[0]["start_date"] + datetime.timedelta(hours=min_time),)
+    logging.info(
+        "Loaded data from {} stations, {} hours".format(len(stations), num_rows)
+    )
 
     result = torch.zeros(num_rows, len(stations), len(stations))
     for dataset in datasets:
@@ -149,8 +146,9 @@ def load_bart_od():
         count = dataset["rows"][:, 3].float()
         result[time, origin, destin] = count
         dataset.clear()
-    logging.info("Loaded {} shaped data of mean {:0.3g}"
-                 .format(result.shape, result.mean()))
+    logging.info(
+        "Loaded {} shaped data of mean {:0.3g}".format(result.shape, result.mean())
+    )
 
     dataset = {
         "stations": stations,
@@ -180,6 +178,8 @@ if __name__ == "__main__":
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
-    logging.basicConfig(format='%(relativeCreated) 9d %(message)s',
-                        level=logging.DEBUG if args.verbose else logging.INFO)
+    logging.basicConfig(
+        format="%(relativeCreated) 9d %(message)s",
+        level=logging.DEBUG if args.verbose else logging.INFO,
+    )
     load_bart_od()

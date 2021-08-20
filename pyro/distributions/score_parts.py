@@ -3,14 +3,17 @@
 
 from collections import namedtuple
 
-from pyro.distributions.util import scale_tensor, mask_tensor
+from pyro.distributions.util import mask_tensor, scale_tensor
 
 
-class ScoreParts(namedtuple('ScoreParts', ['log_prob', 'score_function', 'entropy_term'])):
+class ScoreParts(
+    namedtuple("ScoreParts", ["log_prob", "score_function", "entropy_term"])
+):
     """
     This data structure stores terms used in stochastic gradient estimators that
     combine the pathwise estimator and the score function estimator.
     """
+
     def scale_terms(self, scale=1.0):
         """
         Scale appropriate terms of a gradient estimator by a data multiplicity factor.

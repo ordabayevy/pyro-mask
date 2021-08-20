@@ -27,6 +27,14 @@ AutoCallable
     :special-members: __call__
     :show-inheritance:
 
+AutoNormal
+----------
+.. autoclass:: pyro.infer.autoguide.AutoNormal
+    :members:
+    :undoc-members:
+    :special-members: __call__
+    :show-inheritance:
+
 AutoDelta
 ---------
 .. autoclass:: pyro.infer.autoguide.AutoDelta
@@ -96,6 +104,14 @@ AutoLaplaceApproximation
 AutoDiscreteParallel
 --------------------
 .. autoclass:: pyro.infer.autoguide.AutoDiscreteParallel
+    :members:
+    :undoc-members:
+    :special-members: __call__
+    :show-inheritance:
+
+AutoStructured
+--------------------
+.. autoclass:: pyro.infer.autoguide.AutoStructured
     :members:
     :undoc-members:
     :special-members: __call__

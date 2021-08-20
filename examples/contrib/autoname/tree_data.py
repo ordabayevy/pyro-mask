@@ -72,7 +72,6 @@ def guide_recurse(data, latent):
 
 def main(args):
     pyro.set_rng_seed(0)
-    pyro.enable_validation(__debug__)
 
     optim = Adam({"lr": 0.1})
     inference = SVI(model, guide, optim, loss=Trace_ELBO())
@@ -91,22 +90,22 @@ def main(args):
         },
     }
 
-    print('Step\tLoss')
+    print("Step\tLoss")
     loss = 0.0
     for step in range(args.num_epochs):
         loss += inference.step(data)
         if step and step % 10 == 0:
-            print('{}\t{:0.5g}'.format(step, loss))
+            print("{}\t{:0.5g}".format(step, loss))
             loss = 0.0
 
-    print('Parameters:')
+    print("Parameters:")
     for name, value in sorted(pyro.get_param_store().items()):
-        print('{} = {}'.format(name, value.detach().cpu().numpy()))
+        print("{} = {}".format(name, value.detach().cpu().numpy()))
 
 
-if __name__ == '__main__':
-    assert pyro.__version__.startswith('1.2.1')
+if __name__ == "__main__":
+    assert pyro.__version__.startswith("1.7.0")
     parser = argparse.ArgumentParser(description="parse args")
-    parser.add_argument('-n', '--num-epochs', default=100, type=int)
+    parser.add_argument("-n", "--num-epochs", default=100, type=int)
     args = parser.parse_args()
     main(args)

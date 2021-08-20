@@ -8,6 +8,7 @@ class TimeSeriesModel(PyroModule):
     """
     Base class for univariate and multivariate time series models.
     """
+
     @pyro_method
     def log_prob(self, targets):
         """
@@ -36,5 +37,13 @@ class TimeSeriesModel(PyroModule):
         :returns torch.distributions.Distribution: Returns a predictive distribution with batch shape ``(S,)`` and
             event shape ``(obs_dim,)``, where ``S`` is the size of ``dts``. That is, the resulting
             predictive distributions do not encode correlations between distinct times in ``dts``.
+        """
+        raise NotImplementedError
+
+    def get_dist(self):
+        """
+        Get a :class:`~pyro.distributions.Distribution` object corresponding to
+        this time series model.  Often this is a
+        :class:`~pyro.distributions.GaussianHMM`.
         """
         raise NotImplementedError
