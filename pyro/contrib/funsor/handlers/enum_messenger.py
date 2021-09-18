@@ -191,10 +191,14 @@ class EnumMessenger(NamedMessenger):
             value=msg["name"]
         )
         msg["funsor"]["log_measure"] = enumerate_site(unsampled_log_measure, msg)
-        msg["funsor"]["value"] = _get_support_value(
+        support_value = _get_support_value(
             msg["funsor"]["log_measure"],
             msg["name"],
             expand=msg["infer"].get("expand", False),
+        )
+        msg["funsor"]["value"] = funsor.constant.Constant(
+            OrderedDict(((msg["name"], funsor.Real),)),
+            support_value,
         )
         msg["value"] = to_data(msg["funsor"]["value"])
         msg["done"] = True
