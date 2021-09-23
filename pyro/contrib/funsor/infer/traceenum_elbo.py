@@ -5,10 +5,14 @@ import contextlib
 from functools import reduce
 
 import funsor
+import torch
 from funsor.adjoint import AdjointTape
 
+# from funsor.constant import Constant
+
 from pyro.contrib.funsor import to_data, to_funsor
-from pyro.contrib.funsor.handlers import enum, plate, replay, trace
+from pyro.contrib.funsor.handlers import provenance, enum, plate, replay, trace
+from pyro.contrib.funsor.infer import config_enumerate
 from pyro.contrib.funsor.infer.elbo import ELBO, Jit_ELBO
 from pyro.distributions.util import copy_docs_from
 from pyro.infer import TraceEnum_ELBO as _OrigTraceEnum_ELBO
@@ -123,7 +127,7 @@ class TraceMarkovEnum_ELBO(ELBO):
             )
             contracted_costs = [
                 model_terms["scale"] * f
-                for f in funsor.sum_product.dynamic_partial_sum_product(
+                for f in funsor.sum_product.modified_partial_sum_product(
                     funsor.ops.logaddexp,
                     funsor.ops.add,
                     model_terms["log_measures"] + contracted_factors,
@@ -137,13 +141,22 @@ class TraceMarkovEnum_ELBO(ELBO):
 
             # finally, integrate out guide variables in the elbo and all plates
             if guide_terms["log_measures"]:
-                markov_dims = frozenset({
-                    plate for plate, step in guide_terms["plate_to_step"].items() if step})
+                markov_dims = frozenset(
+                    {
+                        plate
+                        for plate, step in guide_terms["plate_to_step"].items()
+                        if step
+                    }
+                )
                 elbo_terms = funsor.sum_product.compute_expectations(
                     guide_terms["log_measures"],
                     costs,
                     plate_to_step=guide_terms["plate_to_step"],
-                    eliminate=(guide_terms["plate_vars"] | guide_terms["measure_vars"] | markov_dims)
+                    eliminate=(
+                        guide_terms["plate_vars"]
+                        | guide_terms["measure_vars"]
+                        | markov_dims
+                    ),
                 )
             else:
                 elbo_terms = costs
@@ -160,13 +173,10 @@ class TraceEnum_ELBO(ELBO):
     def differentiable_loss(self, model, guide, *args, **kwargs):
 
         # get batched, enumerated, to_funsor-ed traces from the guide and model
-        with plate(
+        with provenance(), enum(), plate(
+            # with enum(), plate(
             size=self.num_particles
-        ) if self.num_particles > 1 else contextlib.ExitStack(), enum(
-            first_available_dim=(-self.max_plate_nesting - 1)
-            if self.max_plate_nesting
-            else None
-        ):
+        ) if self.num_particles > 1 else contextlib.ExitStack():
             guide_tr = trace(guide).get_trace(*args, **kwargs)
             model_tr = trace(replay(model, trace=guide_tr)).get_trace(*args, **kwargs)
 
@@ -174,31 +184,68 @@ class TraceEnum_ELBO(ELBO):
         guide_terms = terms_from_trace(guide_tr)
         model_terms = terms_from_trace(model_tr)
 
-        # build up a lazy expression for the elbo
-        with funsor.terms.lazy:
-            # identify and contract out auxiliary variables in the model with partial_sum_product
-            contracted_factors, uncontracted_factors = [], []
-            for f in model_terms["log_factors"]:
-                if model_terms["measure_vars"].intersection(f.inputs):
-                    contracted_factors.append(f)
-                else:
-                    uncontracted_factors.append(f)
-            # incorporate the effects of subsampling and handlers.scale through a common scale factor
-            contracted_costs = [
-                model_terms["scale"] * f
-                for f in funsor.sum_product.partial_sum_product(
-                    funsor.ops.logaddexp,
-                    funsor.ops.add,
-                    model_terms["log_measures"] + contracted_factors,
-                    plates=model_terms["plate_vars"],
-                    eliminate=model_terms["measure_vars"],
+        # identify and contract out auxiliary variables in the model with partial_sum_product
+        contracted_factors, uncontracted_factors = [], []
+        for f in model_terms["log_factors"]:
+            if model_terms["measure_vars"].intersection(f.inputs):
+                contracted_factors.append(f)
+            else:
+                uncontracted_factors.append(f)
+        # incorporate the effects of subsampling and handlers.scale through a common scale factor
+        contracted_costs = [
+            model_terms["scale"] * f
+            for f in funsor.sum_product.partial_sum_product(
+                funsor.ops.logaddexp,
+                funsor.ops.add,
+                model_terms["log_measures"] + contracted_factors,
+                plates=model_terms["plate_vars"],
+                eliminate=model_terms["measure_vars"],
+            )
+        ]
+
+        # accumulate costs from model (logp) and guide (-logq)
+        costs = contracted_costs + uncontracted_factors  # model costs: logp
+        costs += [-f for f in guide_terms["log_factors"]]  # guide costs: -logq
+
+        plate_vars = guide_terms["plate_vars"] | model_terms["plate_vars"]
+        # compute log_measures corresponding to each cost term
+        # the goal is to achieve fine-grained Rao-Blackwellization
+        targets = dict()
+        for cost in costs:
+            if cost.input_vars not in targets:
+                targets[cost.input_vars] = Constant(
+                    cost.inputs, funsor.Tensor(torch.tensor(0.0))
                 )
-            ]
+        with AdjointTape() as tape:
+            logzq = funsor.sum_product.sum_product(
+                funsor.ops.logaddexp,
+                funsor.ops.add,
+                guide_terms["log_measures"] + list(targets.values()),
+                plates=plate_vars,
+                eliminate=(plate_vars | guide_terms["measure_vars"]),
+            )
+        log_measures = tape.adjoint(
+            funsor.ops.logaddexp, funsor.ops.add, logzq, tuple(targets.values())
+        )
+        with funsor.terms.eager:
+            # finally, integrate out guide variables in the elbo and all plates
+            elbo = to_funsor(0, output=funsor.Real)
+            for cost in costs:
+                target = targets[cost.input_vars]
+                log_measure = log_measures[target]
+                measure_vars = frozenset(cost.inputs) - plate_vars
+                elbo_term = funsor.Integrate(
+                    log_measure,
+                    cost,
+                    measure_vars,
+                )
+                elbo += elbo_term.reduce(
+                    funsor.ops.add, plate_vars & frozenset(cost.inputs)
+                )
 
-            # accumulate costs from model (logp) and guide (-logq)
-            costs = contracted_costs + uncontracted_factors  # model costs: logp
-            costs += [-f for f in guide_terms["log_factors"]]  # guide costs: -logq
-
+        # evaluate the elbo, using memoize to share tensor computation where possible
+        with funsor.interpretations.memoize():
+            return -to_data(apply_optimizer(elbo))
             # compute expected cost
             # Cf. pyro.infer.util.Dice.compute_expectation()
             # https://github.com/pyro-ppl/pyro/blob/0.3.0/pyro/infer/util.py#L212
