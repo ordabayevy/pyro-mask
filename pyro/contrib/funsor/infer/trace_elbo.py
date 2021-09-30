@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import contextlib
+from functools import reduce
 
 import funsor
 import torch
@@ -22,11 +23,8 @@ from .traceenum_elbo import apply_optimizer, terms_from_trace
 class Trace_ELBO(ELBO):
     def differentiable_loss(self, model, guide, *args, **kwargs):
         with provenance(), plate(
-            size=self.num_particles
+            name="_PARTICLES", size=self.num_particles, dim=-self.max_plate_nesting
         ) if self.num_particles > 1 else contextlib.ExitStack():
-            #  guide_tr = trace(
-            #      config_enumerate(default="flat", num_samples=self.num_particles)(guide)
-            #  ).get_trace(*args, **kwargs)
             guide_tr = trace(guide).get_trace(*args, **kwargs)
             model_tr = trace(replay(model, trace=guide_tr)).get_trace(*args, **kwargs)
 
@@ -36,7 +34,9 @@ class Trace_ELBO(ELBO):
         # cost terms
         costs = model_terms["log_factors"] + [-f for f in guide_terms["log_factors"]]
 
-        plate_vars = guide_terms["plate_vars"] | model_terms["plate_vars"]
+        plate_vars = (
+            guide_terms["plate_vars"] | model_terms["plate_vars"]
+        ) - frozenset({"_PARTICLES"})
         # compute log_measures corresponding to each cost term
         # the goal is to achieve fine-grained Rao-Blackwellization
         targets = dict()
@@ -56,20 +56,25 @@ class Trace_ELBO(ELBO):
         log_measures = tape.adjoint(
             funsor.ops.logaddexp, funsor.ops.add, logzq, tuple(targets.values())
         )
-        with funsor.terms.lazy:
+        with funsor.terms.eager:
             # finally, integrate out guide variables in the elbo and all plates
             elbo = to_funsor(0, output=funsor.Real)
             for cost in costs:
                 target = targets[cost.input_vars]
                 log_measure = log_measures[target]
-                measure_vars = frozenset(cost.inputs) - plate_vars
+                measure_vars = (frozenset(cost.inputs) - plate_vars) - frozenset(
+                    {"_PARTICLES"}
+                )
                 elbo_term = funsor.Integrate(
                     log_measure,
                     cost,
                     measure_vars,
                 )
-                elbo += elbo_term.reduce(
-                    funsor.ops.add, plate_vars & frozenset(cost.inputs)
+                elbo += (
+                    elbo_term.reduce(
+                        funsor.ops.add, plate_vars & frozenset(cost.inputs)
+                    ).reduce(funsor.ops.add)
+                    / self.num_particles
                 )
 
         # evaluate the elbo, using memoize to share tensor computation where possible
