@@ -1,6 +1,7 @@
 # Copyright Contributors to the Pyro project.
 # SPDX-License-Identifier: Apache-2.0
 
+import pytest
 import torch
 
 import pyro
@@ -9,7 +10,8 @@ from pyro.distributions.testing.fakes import NonreparameterizedNormal
 from pyro.infer.inspect import get_dependencies
 
 
-def test_get_dependencies():
+@pytest.mark.parametrize("grad_enabled", [True, False])
+def test_get_dependencies(grad_enabled):
     def model(data):
         a = pyro.sample("a", dist.Normal(0, 1))
         b = pyro.sample("b", NonreparameterizedNormal(a, 0))
@@ -30,7 +32,8 @@ def test_get_dependencies():
         return [a, b, c, d, e, f, g, h, i, j, k]
 
     data = torch.randn(3)
-    actual = get_dependencies(model, (data,))
+    with torch.set_grad_enabled(grad_enabled):
+        actual = get_dependencies(model, (data,))
     _ = set()
     expected = {
         "prior_dependencies": {
@@ -41,14 +44,14 @@ def test_get_dependencies():
             "e": {"e": _},
             "f": {"f": _},
             "g": {"g": _, "e": _, "f": _},
-            "h": {"h": _, "c": _},  # [sic]
+            "h": {"h": _, "c": _, "d": _},
             "k": {"k": _, "a": _, "h": _},
         },
         "posterior_dependencies": {
             "a": {"a": _, "b": _, "c": _, "d": _, "h": _, "k": _},
             "b": {"b": _, "c": _},
-            "c": {"c": _, "d": _, "h": _},  # [sic]
-            "d": {"d": _},
+            "c": {"c": _, "d": _, "h": _},
+            "d": {"d": _, "h": _},
             "e": {"e": _, "g": _, "f": _},
             "f": {"f": _, "g": _},
             "h": {"h": _, "k": _},
@@ -113,6 +116,84 @@ def test_docstring_example_3():
         },
         "posterior_dependencies": {
             "a": {"a": {"p"}, "b": set()},
+        },
+    }
+    assert actual == expected
+
+
+def test_factor():
+    def model():
+        a = pyro.sample("a", dist.Normal(0, 1))
+        pyro.factor("b", torch.tensor(0.0))
+        pyro.factor("c", a)
+
+    actual = get_dependencies(model)
+    expected = {
+        "prior_dependencies": {
+            "a": {"a": set()},
+            "b": {"b": set()},
+            "c": {"c": set(), "a": set()},
+        },
+        "posterior_dependencies": {
+            "a": {"a": set(), "c": set()},
+        },
+    }
+    assert actual == expected
+
+
+def test_discrete_obs():
+    def model():
+        a = pyro.sample("a", dist.Normal(0, 1))
+        b = pyro.sample("b", dist.Normal(a[..., None], torch.ones(3)).to_event(1))
+        c = pyro.sample(
+            "c", dist.MultivariateNormal(torch.zeros(3) + a[..., None], torch.eye(3))
+        )
+        with pyro.plate("i", 2):
+            d = pyro.sample("d", dist.Dirichlet((b + c).exp()))
+            pyro.sample("e", dist.Categorical(logits=d), obs=torch.tensor([0, 0]))
+        return a, b, c, d
+
+    actual = get_dependencies(model)
+    expected = {
+        "prior_dependencies": {
+            "a": {"a": set()},
+            "b": {"a": set(), "b": set()},
+            "c": {"a": set(), "c": set()},
+            "d": {"b": set(), "c": set(), "d": set()},
+            "e": {"d": set(), "e": set()},
+        },
+        "posterior_dependencies": {
+            "a": {"a": set(), "b": set(), "c": set()},
+            "b": {"b": set(), "c": set(), "d": set()},
+            "c": {"c": set(), "d": set()},
+            "d": {"d": set(), "e": set()},
+        },
+    }
+    assert actual == expected
+
+
+def test_discrete():
+    def model():
+        a = pyro.sample("a", dist.Dirichlet(torch.ones(3)))
+        b = pyro.sample("b", dist.Categorical(a))
+        c = pyro.sample("c", dist.Normal(torch.zeros(3), 1).to_event(1))
+        d = pyro.sample("d", dist.Poisson(c[b].exp()))
+        pyro.sample("e", dist.Normal(d, 1), obs=torch.ones(()))
+
+    actual = get_dependencies(model)
+    expected = {
+        "prior_dependencies": {
+            "a": {"a": set()},
+            "b": {"a": set(), "b": set()},
+            "c": {"c": set()},
+            "d": {"b": set(), "c": set(), "d": set()},
+            "e": {"d": set(), "e": set()},
+        },
+        "posterior_dependencies": {
+            "a": {"a": set(), "b": set()},
+            "b": {"b": set(), "c": set(), "d": set()},
+            "c": {"c": set(), "d": set()},
+            "d": {"d": set(), "e": set()},
         },
     }
     assert actual == expected
