@@ -11,7 +11,6 @@ from pyro.contrib.funsor.handlers.runtime import (
     StackFrame,
 )
 from pyro.poutine.reentrant_messenger import ReentrantMessenger
-from funsor.constant import Constant
 
 
 class NamedMessenger(ReentrantMessenger):
@@ -65,10 +64,6 @@ class NamedMessenger(ReentrantMessenger):
         name_to_dim = msg["kwargs"].setdefault("name_to_dim", OrderedDict())
         dim_type = msg["kwargs"].setdefault("dim_type", DimType.LOCAL)
 
-        if isinstance(funsor_value, Constant):
-            batch_names = tuple(funsor_value.arg.inputs.keys())
-        else:
-            batch_names = tuple(funsor_value.inputs.keys())
         batch_names = tuple(funsor_value.inputs.keys())
 
         # interpret all names/dims as requests since we only run this function once
