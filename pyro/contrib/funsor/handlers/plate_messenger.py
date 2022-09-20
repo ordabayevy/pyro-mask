@@ -349,10 +349,6 @@ class VectorizedMarkovMessenger(NamedMessenger):
         if type(msg["fn"]).__name__ == "_Subsample":
             return
         BroadcastMessenger._pyro_sample(msg)
-        # replace tensor suffix with a nice slice suffix
-        #  if isinstance(self._suffix, slice):
-        #      assert msg["name"].endswith(str(self._indices))
-        #      msg["name"] = msg["name"][:-len(str(self._indices))] + str(self._suffix)
         if str(self._suffix) != str(self._suffixes[-1]):
             # _do_not_score: record these sites when tracing for use with replay,
             # but do not include them in ELBO computation.
